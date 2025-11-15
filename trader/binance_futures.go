@@ -621,3 +621,132 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+// LimitOpenLong 限价开多仓（使用限价单+止损保护）
+func (t *FuturesTrader) LimitOpenLong(symbol string, quantity float64, leverage int, limitPrice, stopLoss float64) (map[string]interface{}, error) {
+	// 设置杠杆
+	if err := t.SetLeverage(symbol, leverage); err != nil {
+		return nil, err
+	}
+
+	// 格式化数量
+	quantityStr, err := t.FormatQuantity(symbol, quantity)
+	if err != nil {
+		return nil, err
+	}
+
+	// 创建限价开多单
+	order, err := t.client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(futures.SideTypeBuy).
+		PositionSide(futures.PositionSideTypeLong).
+		Type(futures.OrderTypeLimit).
+		TimeInForce(futures.TimeInForceTypeGTC). // Good Till Cancel
+		Quantity(quantityStr).
+		Price(fmt.Sprintf("%.8f", limitPrice)).
+		Do(context.Background())
+
+	if err != nil {
+		return nil, fmt.Errorf("限价开多仓失败: %w", err)
+	}
+
+	log.Printf("✓ 限价开多单已挂: %s 数量: %s 限价: %.4f 止损: %.4f", symbol, quantityStr, limitPrice, stopLoss)
+	log.Printf("  订单ID: %d", order.OrderID)
+
+	result := make(map[string]interface{})
+	result["orderId"] = order.OrderID
+	result["symbol"] = symbol
+	result["status"] = order.Status
+	result["limitPrice"] = limitPrice
+	result["stopLoss"] = stopLoss
+
+	return result, nil
+}
+
+// LimitOpenShort 限价开空仓（使用限价单+止损保护）
+func (t *FuturesTrader) LimitOpenShort(symbol string, quantity float64, leverage int, limitPrice, stopLoss float64) (map[string]interface{}, error) {
+	// 设置杠杆
+	if err := t.SetLeverage(symbol, leverage); err != nil {
+		return nil, err
+	}
+
+	// 格式化数量
+	quantityStr, err := t.FormatQuantity(symbol, quantity)
+	if err != nil {
+		return nil, err
+	}
+
+	// 创建限价开空单
+	order, err := t.client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(futures.SideTypeSell).
+		PositionSide(futures.PositionSideTypeShort).
+		Type(futures.OrderTypeLimit).
+		TimeInForce(futures.TimeInForceTypeGTC).
+		Quantity(quantityStr).
+		Price(fmt.Sprintf("%.8f", limitPrice)).
+		Do(context.Background())
+
+	if err != nil {
+		return nil, fmt.Errorf("限价开空仓失败: %w", err)
+	}
+
+	log.Printf("✓ 限价开空单已挂: %s 数量: %s 限价: %.4f 止损: %.4f", symbol, quantityStr, limitPrice, stopLoss)
+	log.Printf("  订单ID: %d", order.OrderID)
+
+	result := make(map[string]interface{})
+	result["orderId"] = order.OrderID
+	result["symbol"] = symbol
+	result["status"] = order.Status
+	result["limitPrice"] = limitPrice
+	result["stopLoss"] = stopLoss
+
+	return result, nil
+}
+
+// GetOpenOrders 获取该币种的所有挂单
+func (t *FuturesTrader) GetOpenOrders(symbol string) ([]map[string]interface{}, error) {
+	orders, err := t.client.NewListOpenOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+
+	if err != nil {
+		return nil, fmt.Errorf("获取挂单失败: %w", err)
+	}
+
+	result := make([]map[string]interface{}, 0, len(orders))
+	for _, order := range orders {
+		price, _ := strconv.ParseFloat(order.Price, 64)
+		qty, _ := strconv.ParseFloat(order.OrigQuantity, 64)
+
+		orderMap := map[string]interface{}{
+			"orderId":      order.OrderID,
+			"symbol":       order.Symbol,
+			"side":         string(order.Side),
+			"positionSide": string(order.PositionSide),
+			"type":         string(order.Type),
+			"price":        price,
+			"quantity":     qty,
+			"status":       string(order.Status),
+			"time":         order.Time,
+		}
+		result = append(result, orderMap)
+	}
+
+	return result, nil
+}
+
+// CancelOrder 取消指定订单
+func (t *FuturesTrader) CancelOrder(symbol string, orderID int64) error {
+	_, err := t.client.NewCancelOrderService().
+		Symbol(symbol).
+		OrderID(orderID).
+		Do(context.Background())
+
+	if err != nil {
+		return fmt.Errorf("取消订单失败: %w", err)
+	}
+
+	log.Printf("  ✓ 已取消订单 %s #%d", symbol, orderID)
+	return nil
+}

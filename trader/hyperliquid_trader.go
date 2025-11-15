@@ -17,7 +17,7 @@ type HyperliquidTrader struct {
 	ctx           context.Context
 	walletAddr    string
 	meta          *hyperliquid.Meta // 缓存meta信息（包含精度等）
-	isCrossMargin bool             // 是否为全仓模式
+	isCrossMargin bool              // 是否为全仓模式
 }
 
 // NewHyperliquidTrader 创建Hyperliquid交易器
@@ -693,4 +693,24 @@ func absFloat(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+// LimitOpenLong Hyperliquid暂不支持限价单功能
+func (t *HyperliquidTrader) LimitOpenLong(symbol string, quantity float64, leverage int, limitPrice, stopLoss float64) (map[string]interface{}, error) {
+	return nil, fmt.Errorf("Hyperliquid 暂不支持限价单功能")
+}
+
+// LimitOpenShort Hyperliquid暂不支持限价单功能
+func (t *HyperliquidTrader) LimitOpenShort(symbol string, quantity float64, leverage int, limitPrice, stopLoss float64) (map[string]interface{}, error) {
+	return nil, fmt.Errorf("Hyperliquid 暂不支持限价单功能")
+}
+
+// GetOpenOrders Hyperliquid暂不支持限价单功能
+func (t *HyperliquidTrader) GetOpenOrders(symbol string) ([]map[string]interface{}, error) {
+	return nil, fmt.Errorf("Hyperliquid 暂不支持限价单功能")
+}
+
+// CancelOrder Hyperliquid暂不支持限价单功能
+func (t *HyperliquidTrader) CancelOrder(symbol string, orderID int64) error {
+	return fmt.Errorf("Hyperliquid 暂不支持限价单功能")
 }

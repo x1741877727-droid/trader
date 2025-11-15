@@ -39,6 +39,18 @@ type Trader interface {
 	// CancelAllOrders 取消该币种的所有挂单
 	CancelAllOrders(symbol string) error
 
+	// LimitOpenLong 限价开多仓（OCO订单：限价+止损）
+	LimitOpenLong(symbol string, quantity float64, leverage int, limitPrice, stopLoss float64) (map[string]interface{}, error)
+
+	// LimitOpenShort 限价开空仓（OCO订单：限价+止损）
+	LimitOpenShort(symbol string, quantity float64, leverage int, limitPrice, stopLoss float64) (map[string]interface{}, error)
+
+	// GetOpenOrders 获取该币种的所有挂单
+	GetOpenOrders(symbol string) ([]map[string]interface{}, error)
+
+	// CancelOrder 取消指定订单
+	CancelOrder(symbol string, orderID int64) error
+
 	// FormatQuantity 格式化数量到正确的精度
 	FormatQuantity(symbol string, quantity float64) (string, error)
 }

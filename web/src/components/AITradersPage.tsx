@@ -292,7 +292,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       };
 
       await api.updateModelConfigs(request);
-      setAllModels(updatedModels);
+      
+      // 重新获取用户配置以确保数据同步
+      const refreshedModels = await api.getModelConfigs();
+      setAllModels(refreshedModels);
+      
       setShowModelModal(false);
       setEditingModel(null);
     } catch (error) {
@@ -376,7 +380,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       };
       
       await api.updateExchangeConfigs(request);
-      setAllExchanges(updatedExchanges);
+      
+      // 重新获取用户配置以确保数据同步
+      const refreshedExchanges = await api.getExchangeConfigs();
+      setAllExchanges(refreshedExchanges);
+      
       setShowExchangeModal(false);
       setEditingExchange(null);
     } catch (error) {
@@ -819,7 +827,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       {/* Exchange Configuration Modal */}
       {showExchangeModal && (
         <ExchangeConfigModal
-          allExchanges={supportedExchanges}
+          configuredExchanges={allExchanges}
+          supportedExchanges={supportedExchanges}
           editingExchangeId={editingExchange}
           onSave={handleSaveExchangeConfig}
           onDelete={handleDeleteExchangeConfig}
@@ -1151,14 +1160,16 @@ function ModelConfigModal({
 
 // Exchange Configuration Modal Component
 function ExchangeConfigModal({
-  allExchanges,
+  configuredExchanges,
+  supportedExchanges,
   editingExchangeId,
   onSave,
   onDelete,
   onClose,
   language
 }: {
-  allExchanges: Exchange[];
+  configuredExchanges: Exchange[];
+  supportedExchanges: Exchange[];
   editingExchangeId: string | null;
   onSave: (exchangeId: string, apiKey: string, secretKey?: string, testnet?: boolean, hyperliquidWalletAddr?: string, asterUser?: string, asterSigner?: string, asterPrivateKey?: string) => Promise<void>;
   onDelete: (exchangeId: string) => void;
@@ -1179,8 +1190,8 @@ function ExchangeConfigModal({
   const [asterSigner, setAsterSigner] = useState('');
   const [asterPrivateKey, setAsterPrivateKey] = useState('');
 
-  // 获取当前编辑的交易所信息
-  const selectedExchange = allExchanges?.find(e => e.id === selectedExchangeId);
+  // 获取当前编辑的交易所信息（从已配置的交易所中查找）
+  const selectedExchange = configuredExchanges?.find(e => e.id === selectedExchangeId);
 
   // 如果是编辑现有交易所，初始化表单数据
   useEffect(() => {
@@ -1224,8 +1235,8 @@ function ExchangeConfigModal({
     }
   };
 
-  // 可选择的交易所列表（所有支持的交易所）
-  const availableExchanges = allExchanges || [];
+  // 可选择的交易所列表（所有支持的交易所，用于下拉选择）
+  const availableExchanges = supportedExchanges || [];
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
