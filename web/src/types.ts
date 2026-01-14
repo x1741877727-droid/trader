@@ -39,6 +39,29 @@ export interface Position {
   unrealized_pnl_pct: number;
   liquidation_price: number;
   margin_used: number;
+  // 止损止盈字段（可选，可能为空）
+  stop_loss?: number;
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
+}
+
+export interface PendingOrder {
+  symbol: string;
+  side: string;
+  limit_price: number;
+  quantity: number;
+  leverage: number;
+  order_id: number;
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
+  stop_loss?: number;
+  take_profit?: number;
+  create_time?: number;
+  duration_min?: number;
+  confidence?: number;
+  reasoning?: string;
 }
 
 export interface DecisionAction {
@@ -61,6 +84,13 @@ export interface AccountSnapshot {
   margin_used_pct: number;
 }
 
+// 验证错误详情
+export interface ValidationError {
+  symbol: string;
+  action: string;
+  reason: string;
+}
+
 export interface DecisionRecord {
   timestamp: string;
   cycle_number: number;
@@ -74,6 +104,10 @@ export interface DecisionRecord {
   execution_log: string[];
   success: boolean;
   error_message?: string;
+  status?: string; // "ok" | "warning" | "error"
+  error_type?: string;
+  error_severity?: string; // "warning" | "error"
+  validation_errors?: ValidationError[];
 }
 
 export interface Statistics {
@@ -92,6 +126,7 @@ export interface TraderInfo {
   exchange_id?: string;
   is_running?: boolean;
   custom_prompt?: string;
+  candidate_coins?: string[];
 }
 
 export interface AIModel {
@@ -181,6 +216,84 @@ export interface CompetitionTraderData {
 export interface CompetitionData {
   traders: CompetitionTraderData[];
   count: number;
+}
+
+export interface CloseReviewActionItem {
+  owner: string;
+  item: string;
+  due: string;
+}
+
+export interface CloseReviewRecord {
+  trade_id: string;
+  symbol: string;
+  side: string;
+  pnl: number;
+  pnl_pct: number;
+  holding_minutes: number;
+  risk_score: number;
+  execution_score: number;
+  signal_score: number;
+  summary: string;
+  what_went_well: string[];
+  improvements: string[];
+  root_cause: string;
+  extreme_intervention_review: string;
+  action_items: CloseReviewActionItem[];
+  confidence: number;
+  reasoning: string;
+}
+
+export interface CloseReviewSummary extends CloseReviewRecord {
+  trader_id: string;
+  file_path: string;
+  created_at: string;
+}
+
+export interface PositionLifecycleEntry {
+  cycle_number: number;
+  timestamp: string;
+  action: string;
+  reasoning: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface MarketContextAtClose {
+  account_state?: Record<string, unknown>;
+  market_data?: Record<string, unknown>;
+  runtime_meta?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface TradeSnapshot {
+  trade_id: string;
+  symbol: string;
+  side: string;
+  entry_time: string;
+  exit_time: string;
+  entry_price: number;
+  exit_price: number;
+  quantity: number;
+  leverage: number;
+  risk_usd: number;
+  pnl: number;
+  pnl_pct: number;
+  holding_minutes: number;
+  stop_loss?: number;
+  take_profit?: number;
+}
+
+export interface CloseReviewFile {
+  version: number;
+  timestamp: string;
+  trade_snapshot: TradeSnapshot;
+  request_snapshot?: Record<string, unknown>;
+  position_lifecycle: PositionLifecycleEntry[];
+  major_decisions?: PositionLifecycleEntry[];
+  market_context: MarketContextAtClose;
+  cot_trace: string;
+  review: CloseReviewRecord;
+  additional_metadata?: Record<string, unknown>;
 }
 
 // Trader Configuration Data for View Modal

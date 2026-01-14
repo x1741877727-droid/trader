@@ -1,0 +1,81 @@
+════ 模块：HoldPlaybook（已有持仓专用）════
+
+【注】本模块为持仓管理策略说明；具体量化阈值与计算公式已迁移至 `RiskManagement.txt`，请引用该模块进行数值校验。
+
+适用条件：positions 中存在该币种，且已在《RiskGuard-Flow》中完成持仓检查。若 positions=0 或未先执行持仓检查，需要立即切换到《OpenSetup》。本流程专注于持仓管理，不讨论开仓。
+
+-⚠️ 持仓后续动作：
+- 先逐仓完成本模块后，再根据 portfolio 状态判断是否执行多币扫描。
+- 若当前持仓数 < 3，完成所有持仓分析后必须在同一轮推理内继续执行《OpenSetup》/《MultiAssetOpportunityScan》，对未持仓的候选币进行至少 3 个 symbol 的开仓评估，禁止写“下轮再扫”或将扫描延后。
+
+1. **持仓状态評估**
+   - 方向：long / short
+   - 入场价 vs 当前价：盈亏金额 + 百分比
+   - **止损：当前止损价（系统已设置）、当前价距止损多少？触发将亏损多少？**
+     * 注意：系统在开仓时已自动设置止损，持仓信息中的 `stop_loss` 字段即为当前生效的止损价
+     * 必须明确说明：止损价 = X，当前价 = Y，距离 = |Y-X|，触发止损将亏损 = 保证金 × (|Y-X|/Y)
+   - 止盈：TP1/TP2/TP3 的价位、与当前价距离
+   - 提供技术依据（必须引用 `TechnicalIndicators` 中具体字段）
+     * 结构/趋势：`data.PriceAction1h.LastSignal` / `data.PriceAction4h.LastSignal` / `data.TrendPhase.TrendStrength4h`
+     * 动能：`data.TrendPhase.Momentum15m`、`data.MidTermSeries15m.MACDValues`、`data.MidTermSeries15m.RSI7Values`
+     * 波动与止损尺度：`data.RiskMetrics.ATR14PercentOfPrice`、`data.LongerTermData.ATR14`
+     * 位置/区间与关键位：`data.KeyLevels`、`data.Fib1h`、`data.Fib4h`、`data.ICTPOI`
+     * 距离/拉伸度：`data.DistanceMetrics.to_ema*` / `data.DistanceMetrics.to_boll*`
+     * 量能/流动性：`data.VolumePercentile15m`、`data.TradeCount15m`、`data.LargeTakerVolume15m`
+     * 衍生品风险：`data.OIChangePct15m`、`data.FundingChangeRate15mPct`、`data.DerivativesAlert.*`
+     * K 线形态：`data.CandleShapes15m`
+    * 说明：每一项证据都应以 "module.field:short_reason" 格式在 CoT（思维链）中出现
+
+2. **止盈到达概率（必须量化）**
+   - TP1 / TP2 / TP3 各自概率（示例：TP1 70%、TP2 60%、TP3 50%）
+   - ⚠️ 注意：示例值必须符合《CoreTradingRules》规则4要求（TP3 ≥ 50%，或 TP1 ≥ 70% 且 TP2 ≥ 60%）
+   - 提供技术依据（请引用具体字段）：
+     * 趋势/结构支持：`data.PriceAction1h.LastSignal` / `data.PriceAction4h.LastSignal` / `data.TrendPhase.TrendStrength4h`
+     * 支撑/阻力与订单块：`data.KeyLevels` / `data.ICTPOI`
+     * 布林/拉伸：`data.DistanceMetrics.to_boll*` / `data.DistanceMetrics.to_ema*`
+     * K线与短周期触发：`data.CandleShapes15m`
+     * 量能/流动性：`data.VolumePercentile15m` / `data.TradeCount15m`
+   - 给出“最可能抵达的TP”结论与理由
+ 
+（强制）数值计算与输出要求（持仓管理相关）：
+- 在计算当前持仓的止损影响、止盈距离与 R:R 时，AI 必须在 CoT 中逐步列出并展示数值计算：
+  1) entry = <数值>
+  2) stop = <数值>
+  3) target = <数值>
+  4) risk = |entry - stop|
+  5) reward = |target - entry|
+  6) rr = reward / risk
+- 在 CoT 后紧接单行 JSON（machine-readable），包含 `"entry","stop","target","risk","reward","rr"` 值，确保后端能复算并校验一致性；若不一致，返回 `action=error` 并在 CoT 说明差异。
+
+3. **反转概率分析**
+  - 反转概率（如 30%）
+  - 反转信号（请在 CoT（思维链）中以字段形式列出并说明周期与数值；JSON.reasoning 保留单行摘要）：
+     * 结构信号：`data.PriceAction15m.LastSignal` / `data.PriceAction1h.LastSignal` 的 CHoCH/BOS 反向信号
+     * K 线反转形态：`data.CandleShapes15m`（如 bearish_engulfing/pinbar 等）
+     * 指标背离与动能转弱：各周期MACD/RSI（出现背离或 MACD 柱缩）- 重点关注15m/1h/4h周期
+     * 突破关键位：`data.KeyLevels` 被收盘价实质突破（并伴成交量放大）
+     * 衍生品放大信号：`data.OIChangePct15m` 与 `data.FundingChangeRate15mPct` 同向急变（放大反转概率）
+     * 量能/滑点预警：`data.VolumePercentile15m`、`data.LargeTakerVolume15m` 显著异常 → 增加反转/冲击风险
+     * 123法则：结构上确认三步（请以 "123: step1/step2/step3 描述" 形式写明）
+   - 反转可能位置 & 反转后目标价：引用 `data.KeyLevels` 或 `data.Fib1h/Fib4h` 指定价位
+
+4. **风险提示（逐项覆盖）**
+   - 止损风险：距离与潜在亏损
+   - 趋势反转风险：若反向发展，最大亏损
+   - 关键位置风险：当前是否处于关键支撑/阻力附近
+   - 时间风险：持仓是否过久导致趋势衰竭
+   - 市场状态变化：趋势→震荡或反之
+   - 突发事件风险：宏观、消息面
+
+5. **持仓建议**
+   - hold / 部分止盈 / close_long / close_short / update_stop_loss / update_take_profit
+   - 决策理由需引用上述概率与风险
+   - 若建议 hold，说明为何仍看好；若建议 close，说明反转概率或风险已占优
+   - 触发极端介入时，必须： CoT（思维链） 以“[极端介入]”开头；列出至少两个周期或两个工具的一致反转信号；给出 TP概率 vs 反转概率的对比，说明为何提前平仓/抬止损优于原计划；设置 intervention_level="extreme" 且 confidence≥85
+
+6. **高风险行为提醒（默认不建议，允许在极端/结构明显坏掉时破例）**
+   - 持仓未满30分钟且盈利<TP1、4h趋势未变：默认不建议平仓，除非出现突发重大消息、结构明显被破坏，或你的交易计划本身就是极短线；如需破例，请在 reasoning 中说明原因。
+   - 仅因15m波动恐慌平仓：默认不建议，优先回到结构/TP概率/风险评估再决定。
+   - 未给出概率或风险描述就做决策：默认不建议，建议先补全思考再执行。
+   - 未写“[极端介入]”或未满足条件却设置 intervention_level：视为使用了不严谨的标签，应在 CoT（思维链） 中自我纠正并解释实际介入级别。
+

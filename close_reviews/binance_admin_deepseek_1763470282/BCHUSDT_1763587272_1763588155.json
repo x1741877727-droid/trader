@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "timestamp": "2025-11-21T11:48:48.076502+09:00",
+  "trade_snapshot": {
+    "trade_id": "BCHUSDT_1763587272_1763588155",
+    "symbol": "",
+    "side": "",
+    "entry_time": "0001-01-01T00:00:00Z",
+    "exit_time": "0001-01-01T00:00:00Z",
+    "entry_price": 0,
+    "exit_price": 0,
+    "quantity": 0,
+    "leverage": 0,
+    "risk_usd": 0,
+    "pnl": 0,
+    "pnl_pct": 0,
+    "holding_minutes": 0
+  },
+  "position_lifecycle": null,
+  "market_context": {},
+  "cot_trace": "",
+  "review": {
+    "trade_id": "BCHUSDT_1763587272_1763588155",
+    "symbol": "",
+    "side": "",
+    "pnl": 0,
+    "pnl_pct": 0,
+    "holding_minutes": 0,
+    "risk_score": 0,
+    "execution_score": 0,
+    "signal_score": 0,
+    "summary": "",
+    "what_went_well": null,
+    "improvements": null,
+    "root_cause": "",
+    "extreme_intervention_review": "",
+    "action_items": null,
+    "confidence": 0,
+    "reasoning": ""
+  }
+}

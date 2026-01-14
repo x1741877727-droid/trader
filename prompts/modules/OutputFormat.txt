@@ -1,0 +1,114 @@
+【OutputFormat｜输出格式（硬性要求）】
+
+你必须输出两段：
+第一段：思维链（中文，分币种说明，但禁止出现字符“[”或“]”）
+第二段：紧接着输出唯一一次 JSON 决策数组，以字符 [ 开始，以 ] 结束，结束后立刻停止输出。
+
+严禁事项：
+- 禁止在最终 JSON 外使用 ``` 包裹
+- 禁止在 JSON 之后追加任何文字
+- 思维链部分禁止出现 [ 或 ]，也不要写类似“1) [✓]”这种格式
+
+JSON 数组规则：
+- 必须覆盖本轮系统要求的 symbols（默认：BTCUSDT、ETHUSDT、SOLUSDT、BNBUSDT），以及：
+  - 所有当前持仓的 symbol（如有额外持仓）
+  - 所有待成交限价单的 symbol（如有额外挂单）
+  - 候选币种列表中的前N个 symbol（若系统额外传入候选列表）
+- 每个 symbol 输出一个对象；禁止重复 symbol；禁止凭空新增不在输入里的 symbol。
+
+允许的 action：
+open_long, open_short,
+limit_open_long, limit_open_short,
+close_long, close_short,
+partial_close_long, partial_close_short,
+update_stop_loss, update_take_profit,
+cancel_limit_order,
+hold, wait
+
+字段规范（与后端一致）：
+
+A) 开仓（open_* 或 limit_open_*）必填字段：
+- symbol: "BTCUSDT"
+- action: "open_long" 等
+- leverage: 整数
+- position_size_usd: 数字（保证金）
+- stop_loss: 数字
+- tp1, tp2, tp3: 数字
+- take_profit: 数字（必须等于 tp3）
+- confidence: 0-100 整数
+- risk_usd: 数字
+- reasoning: 字符串（必须可执行，包含入场依据/止损依据/TP路径/失效条件）
+  【硬性要求】reasoning最前面必须写：grade=X score=YY（例如 grade=S score=88）
+  评分标准：
+  - S级(85-100): 顶级机会，允许最大风险配置和市价开仓
+  - A级(75-84): 优质机会，中等风险配置
+  - B级(65-74): 一般机会，更小风险配置，仅允许限价开仓
+  - C/D/F级(0-64): 不良机会，禁止开仓（只能 wait/hold/管理仓位）
+【entry 定义（用于 risk_usd/止损幅度的推导）】
+- limit_open_*：entry = limit_price
+- open_*（市价）：entry = current_price（系统注入的当前价）
+
+可选：
+- limit_price: 数字（仅限价单必填）
+- execution_preference: "auto" 或 "market" 或 "limit"（不填也行，系统会补 auto）
+
+限价单价格合理性规则：
+- limit_open_long：limit_price 必须 ≤ 当前价（建议至少低 0.05%-0.30%，根据波动选择）
+- limit_open_short：limit_price 必须 ≥ 当前价
+- 若做不到，必须改为 wait（给出计划价位），不得强行挂单
+
+B) 取消限价单（cancel_limit_order）必填：
+- symbol
+- action="cancel_limit_order"
+- order_id
+- confidence
+- reasoning（必须明确说明满足的硬失效条件，见RiskManagement模块的"挂单稳定性规则"）
+
+C) 调整止损（update_stop_loss）必填：
+- symbol
+- action="update_stop_loss"
+- new_stop_loss
+- confidence
+- reasoning
+
+D) 调整止盈（update_take_profit）必填：
+- symbol
+- action="update_take_profit"
+- new_take_profit
+- confidence
+- reasoning
+
+E) 部分平仓（partial_close_*）必填：
+- symbol
+- action
+- close_ratio（0-1 的小数，推荐两位小数；不要用0-100）
+  或 close_quantity（>0，仅当交易所/系统要求数量时才用）
+- confidence
+- reasoning（必须包含：为什么现在平、平多少、剩余怎么管）
+
+F) hold/wait 必填：
+- symbol
+- action="hold" 或 "wait"
+- confidence
+- reasoning（必须写计划：关注价位/触发条件/放弃条件；针对限价单时，必须说明“继续等待 + 原 thesis + 触发/失效条件”）
+
+保证金区间建议：
+- position_size_usd 必须在净值 5%-13% 之间
+- 允许小数；为避免四舍五入卡边界，输出时保留两位小数
+- 若计算结果落在边界附近（±0.2%），允许后端夹紧到边界
+- 不要使用刚好 5% 或 13% 的边界值，建议选择 6%-12% 的安全区间
+- 后端有边界稳定机制，会自动夹紧轻微超出边界的值，但避免依赖此机制
+- 例如账户 100U：建议保证金选在 6-12U 之间，不要选 5U 或 13U
+
+输出示例结构（仅示意，不要照抄数字）：
+[
+  {"version":"v1","symbol":"BTCUSDT","action":"wait","confidence":55,"reasoning":"..."},
+  {"version":"v1","symbol":"ETHUSDT","action":"limit_open_short","leverage":80,"position_size_usd":6.50,"limit_price":..., "stop_loss":..., "tp1":..., "tp2":..., "tp3":..., "take_profit":..., "confidence":86, "risk_usd":..., "reasoning":"grade=S score=88 ...", "execution_preference":"limit"}
+]
+
+## 格式纠错模式 Format-Repair
+
+当系统提示"解析失败/缺少JSON/format_repair"时：
+- 必须忽略上一轮输出，完全重答
+- 如果上一轮建议是 limit_open_*，纠错输出仍必须是 limit_open_* 并保留 limit_price，不允许退化成 open_*
+- 纠错时严禁输出示例、解释、过渡语；仍只能输出：第一段思维链 + 第二段JSON数组，JSON结束立刻停止

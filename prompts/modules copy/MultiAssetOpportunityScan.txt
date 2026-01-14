@@ -1,0 +1,58 @@
+════ 模块：Multi-Asset Opportunity Scan ════
+
+【适用前提】
+- 已完整执行《HoldPlaybook》，并确认当前持仓状态准确
+- ⚠️ **后端硬性检查：持仓数量限制**：当前持仓数 + 待成交限价单数 < 3（maxConcurrentPositions = 3）
+  * 若已达3个 → 立即输出"不开仓：持仓数已满（3/3）"，停止本模块
+  * RiskGuard-Flow 未触发"暂停加仓"
+- 账户可用保证金 > 0 且保证金使用率 < 70%；若不满足需直接给出 wait 理由
+
+【输入令牌】
+- 账户信息行中的 available_balance / total_equity / margin_used_pct / position_count
+- 持仓列表（方向、杠杆、占用保证金、TP阶段）与剩余仓位空位 slots
+- CandidateCoins 列表（含来源标签、行情/MACD/RSI/深度数据）
+- 杠杆与保证金动态调整：遵守《CoreTradingRules》规则8：杠杆与保证金动态调整
+
+【执行步骤】
+在以下步骤中，一律复用 SystemCore 的结构 / 趋势 / 动量 / 风险四段式输出（与《HoldPlaybook》相同），并严格**复用 `OpenSetup` 的完整模板与 CoT/JSON 语义**（见一致性要求）。
+1. ⚠️ **后端硬性检查：持仓数量限制（必须最优先执行）**：
+   - 计算 slots = max(0, 3 - 当前持仓数 - 待成交限价单数)
+   - slots=0 → 立即输出"不开仓：持仓数已满（3/3），禁止开新仓"，停止本模块，不再进入任何扫描
+   -  CoT（思维链）必须写明："当前持仓X个，待成交限价单Y个，剩余空位Z个"
+2. 资源核查：available_balance 占净值需≥5%；margin_used_pct ≥65% 要在理由中标注风险，≥70% 直接 wait。
+3. 模板分配：
+   - full_template_quota = min(max(1, slots), 2)。当 slots=2（当前持仓=1）→ 完整模板覆盖 2 个币；slots=1（当前持仓=2）→ 覆盖 1 个币；slots=3（当前持仓=0）→ 直接改用《OpenSetup》模块，不走本流程。
+   - 完整模板：对 quota 内的币逐条执行《OpenSetup》步骤1-7（市场状态到输出要求），确保写出趋势起止点、R:R、失败概率、机会等级等全部字段，action 仅 open_* / wait。
+   - 余下候选币：仍需列入扫描结果，但以“极简概览”方式呈现（每币 ≤4 行，包含信号、触发条件、风险、建议动作），禁止省略理由。
+4. 候选币筛选：跳过已持仓币，优先 CandidateCoins 排名前序（至少覆盖 quota + 1 个，或 CandidateCoins 全部）。
+5. 逐币分析：对所有入选币引用 SystemCore 框架，写清：
+   - **市场状态判断**：明确判断该币种是趋势市 / 震荡市 / 不确定
+   - **策略选择**：参考《TradingStrategyMatrix》，明确说明选择了哪个策略（策略A/B/C/D/E）和选择理由
+   - 当前信号强度（例如 4h 结构、1h/15m 动量、OI/资金费率、多空大户持仓占比）
+   - 具体触发条件（入场区间、确认K线、时间窗口）与失效条件
+   - 风险点（相关性、回撤、宏观事件、板块拥挤度）
+   - 机会质量等级（S/A/B级，参考《OpportunityScoring》）
+   - 山寨币（非 BTC/ETH/SOL 等主流蓝筹）在"极简概览"区块中同样遵循 4 行模板，每行 ≤1 句。
+6. 相关性检查：若候选币与现有仓位高度同向或同驱动，需给出减分理由，必要时直接拒绝。
+7. 行动判定：
+   - 满足所有硬条件 → 给出可执行计划（市价或限价），为 OutputFormat 准备 open_* / limit_* 指令，并写明目标仓位保证金、杠杆、止损/TP。
+   - 证据不足/风险过高 → 写“不开仓 + 具体理由”，禁止模糊描述。
+8. 汇总 slots 使用情况与下一步关注要点（例如“slots=1，等待 BTC 突破 94k”），并在 CoT（思维链）中说明“完整模板币种 vs 概览币种”的分配结果；JSON.reasoning 保留单行摘要。
+
+一致性要求（强制）
+- full_template 必须以 `OpenSetup` 模块的 1–8 步为“子流程”执行，不得自行重写逻辑。具体要求：
+  * CoT（思维链）格式：严格使用 `OpenSetup` 定义的顺序（positions_token → market_state & trend_phase → Top‑3 证据 → strategy_choice & entry_plan → risk_plan → required_checks → execution_assumptions → failure_conditions → JSON）。
+ * JSON 输出：无论是否开仓，最后都必须输出一个完整的JSON数组；对不开仓的币种：使用 action="wait"，并在reasoning里写清缺失的条件；JSON.reasoning 保留单行摘要（如需要）。
+  * 证据格式：所有 evidence 必须采用 `module.field[@period]:short_reason` 形式（例如 `PriceAction.1h.LastSignal@1h:BOS`）以便后端溯源。
+  * required_checks 与 RISK id：full_template 必须列出所有需后端校验的 RISK ids（例如 `["RISK:MIN_RR","RISK:MAX_MARGIN_PCT"]`），并在 JSON 中包含 `required_checks` 字段。
+ * stop_anchor 约定：若只给出 stop_anchor 文本，必须在 CoT（思维链）中给出解析 hint（如 "stop_anchor=4h_swing_low → map_to_keylevel_id=KL_4H_123"），便于后端解析为具体 price；JSON.reasoning 可保留单行解析摘要以便快速校验。
+  * slots/资源检查必须在最前执行，并以机器可读行（例如 `slots=1, margin_used_pct=68`）在 CoT 起始处明确。
+
+实现意图
+- 该模块为“多币并行筛选 + 对 top K 做 OpenSetup 完整评估”的执行层；为了保证一致性、可审计与后端解析正确，full_template 必须直接依赖 OpenSetup 的模板与 OutputFormat 的 schema，避免逻辑分叉或字段名不一致。
+【输出要求】
+- 在思维链中列出“币种 → 信号概述 → 触发条件 → 风险 → 建议动作”。
+ - 仅当建议动作为执行时，才在 JSON 中添加对应开仓决策；否则需要在 CoT（思维链）中明确 wait/skip 理由，JSON.reasoning 可写简短单行总结。
+- JSON 中 open_* / limit_* 指令必须包含正数的 position_size_usd（= 本笔实际保证金，不是名义价值/币本位数量），不得留空、不写或写为 0。
+- 若因资源受限终止扫描，必须复述限制条件（如“margin_used_pct=72%，禁止加仓”）并指示模型返回 wait。
+

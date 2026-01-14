@@ -55,8 +55,17 @@ func (pm *PromptManager) LoadTemplates(dir string) error {
 		return fmt.Errorf("提示词目录不存在: %s", dir)
 	}
 
-	// 扫描目录中的所有 .txt 文件
-	files, err := filepath.Glob(filepath.Join(dir, "*.txt"))
+	// 递归扫描目录及其子目录中的所有 .txt 文件
+	var files []string
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".txt") {
+			files = append(files, path)
+		}
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("扫描提示词目录失败: %w", err)
 	}

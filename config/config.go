@@ -50,16 +50,57 @@ type LeverageConfig struct {
 	AltcoinLeverage int `json:"altcoin_leverage"` // 山寨币的杠杆倍数（主账户建议5-20，子账户≤5）
 }
 
+// ExecutionGateConfig 执行门禁配置
+type ExecutionGateConfig struct {
+	MaxSpreadBpsLimitOnly       float64 `json:"max_spread_bps_limit_only"`        // 超过此点差强制限价 (默认 50.0 = 0.5%)
+	MaxSpreadBpsLimitPreferred  float64 `json:"max_spread_bps_limit_preferred"`   // 超过此点差推荐限价 (默认 15.0 = 0.15%)
+	MinBestNotionalUsdtLimitOnly    float64 `json:"min_best_notional_usdt_limit_only"`     // 最优档位最小名义价值强制限价 (默认 50000.0 USDT)
+	MinBestNotionalUsdtLimitPreferred float64 `json:"min_best_notional_usdt_limit_preferred"` // 最优档位最小名义价值推荐限价 (默认 10000.0 USDT)
+	MaxDepthRatioAbs             float64 `json:"max_depth_ratio_abs"`            // 最大深度比率绝对值 (默认 3.0)
+	DefaultModeOnMissing         string  `json:"default_mode_on_missing"`        // microstructure 缺失时的默认模式 (默认 "limit_only")
+}
+
+// RiskManagementConfig 账户分层风控配置
+type RiskManagementConfig struct {
+	// Aggressive Mode (equity <= 200)
+	AggressiveMode struct {
+		MaxConcurrentPositions int      `json:"max_concurrent_positions"` // 最大并发持仓数
+		AllowedSymbols         []string `json:"allowed_symbols"`          // 允许交易的标的
+		MaxLeverage            int      `json:"max_leverage"`             // 杠杆上限
+		MinLeverage            int      `json:"min_leverage"`             // 杠杆下限
+		RiskUsdMinPct          float64  `json:"risk_usd_min_pct"`         // 单笔风险预算下限(%)
+		RiskUsdMaxPct          float64  `json:"risk_usd_max_pct"`         // 单笔风险预算上限(%)
+		DailyLossLimitPct      float64  `json:"daily_loss_limit_pct"`     // 每日损失限制(%)
+	} `json:"aggressive_mode"`
+
+	// Standard Mode (200 < equity <= 1000)
+	StandardMode struct {
+		MaxConcurrentPositions int     `json:"max_concurrent_positions"`
+		MaxLeverage            int     `json:"max_leverage"`
+		MarginUsageLimitPct    float64 `json:"margin_usage_limit_pct"` // 保证金使用率上限(%)
+	} `json:"standard_mode"`
+
+	// Conservative Mode (equity > 1000)
+	ConservativeMode struct {
+		MaxConcurrentPositions int     `json:"max_concurrent_positions"`
+		MaxLeverage            int     `json:"max_leverage"`
+		MarginUsageLimitPct    float64 `json:"margin_usage_limit_pct"`
+		NotionalCapPct         float64 `json:"notional_cap_pct"` // 名义价值上限(%)
+	} `json:"conservative_mode"`
+}
+
 // Config 总配置
 type Config struct {
-	Traders            []TraderConfig `json:"traders"`
-	UseDefaultCoins    bool           `json:"use_default_coins"` // 是否使用默认主流币种列表
-	DefaultCoins       []string       `json:"default_coins"`     // 默认主流币种池
-	APIServerPort      int            `json:"api_server_port"`
-	MaxDailyLoss       float64        `json:"max_daily_loss"`
-	MaxDrawdown        float64        `json:"max_drawdown"`
-	StopTradingMinutes int            `json:"stop_trading_minutes"`
-	Leverage           LeverageConfig `json:"leverage"` // 杠杆配置
+	Traders            []TraderConfig       `json:"traders"`
+	UseDefaultCoins    bool                 `json:"use_default_coins"`    // 是否使用默认主流币种列表
+	DefaultCoins       []string             `json:"default_coins"`       // 默认主流币种池
+	APIServerPort      int                  `json:"api_server_port"`
+	MaxDailyLoss       float64              `json:"max_daily_loss"`
+	MaxDrawdown        float64              `json:"max_drawdown"`
+	StopTradingMinutes int                  `json:"stop_trading_minutes"`
+	Leverage           LeverageConfig       `json:"leverage"`             // 杠杆配置
+	ExecutionGate      ExecutionGateConfig `json:"execution_gate"`       // 执行门禁配置
+	RiskManagement     RiskManagementConfig `json:"risk_management"`     // 分层风控配置
 }
 
 // LoadConfig 从文件加载配置
@@ -91,6 +132,87 @@ func LoadConfig(filename string) (*Config, error) {
 			"ADAUSDT",
 			"HYPEUSDT",
 		}
+	}
+
+	// 设置 ExecutionGate 默认值
+	if config.ExecutionGate.MaxSpreadBpsLimitOnly <= 0 {
+		config.ExecutionGate.MaxSpreadBpsLimitOnly = 50.0 // 0.5%
+	}
+	if config.ExecutionGate.MaxSpreadBpsLimitPreferred <= 0 {
+		config.ExecutionGate.MaxSpreadBpsLimitPreferred = 15.0 // 0.15%
+	}
+	if config.ExecutionGate.MinBestNotionalUsdtLimitOnly <= 0 {
+		config.ExecutionGate.MinBestNotionalUsdtLimitOnly = 50000.0 // 50000 USDT
+	}
+	if config.ExecutionGate.MinBestNotionalUsdtLimitPreferred <= 0 {
+		config.ExecutionGate.MinBestNotionalUsdtLimitPreferred = 10000.0 // 10000 USDT
+	}
+	if config.ExecutionGate.MaxDepthRatioAbs <= 0 {
+		config.ExecutionGate.MaxDepthRatioAbs = 3.0 // 3.0
+	}
+	if config.ExecutionGate.DefaultModeOnMissing == "" {
+		config.ExecutionGate.DefaultModeOnMissing = "limit_only"
+	}
+
+	// 设置 RiskManagement 默认值
+	// Aggressive Mode (equity <= 200)
+	if config.RiskManagement.AggressiveMode.MaxConcurrentPositions <= 0 {
+		config.RiskManagement.AggressiveMode.MaxConcurrentPositions = 1
+	}
+	if len(config.RiskManagement.AggressiveMode.AllowedSymbols) == 0 {
+		config.RiskManagement.AggressiveMode.AllowedSymbols = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+	}
+	if config.RiskManagement.AggressiveMode.MaxLeverage <= 0 {
+		config.RiskManagement.AggressiveMode.MaxLeverage = 100
+	}
+	if config.RiskManagement.AggressiveMode.MinLeverage <= 0 {
+		config.RiskManagement.AggressiveMode.MinLeverage = 40
+	}
+	if config.RiskManagement.AggressiveMode.RiskUsdMinPct <= 0 {
+		config.RiskManagement.AggressiveMode.RiskUsdMinPct = 8.0 // 8%
+	}
+	if config.RiskManagement.AggressiveMode.RiskUsdMaxPct <= 0 {
+		config.RiskManagement.AggressiveMode.RiskUsdMaxPct = 15.0 // 15%
+	}
+	if config.RiskManagement.AggressiveMode.DailyLossLimitPct <= 0 {
+		config.RiskManagement.AggressiveMode.DailyLossLimitPct = 15.0 // 15%
+	}
+
+	// Standard Mode (200 < equity <= 1000)
+	if config.RiskManagement.StandardMode.MaxConcurrentPositions <= 0 {
+		config.RiskManagement.StandardMode.MaxConcurrentPositions = 2
+	}
+	if config.RiskManagement.StandardMode.MaxLeverage <= 0 {
+		config.RiskManagement.StandardMode.MaxLeverage = 75
+	}
+	if config.RiskManagement.StandardMode.MarginUsageLimitPct <= 0 {
+		config.RiskManagement.StandardMode.MarginUsageLimitPct = 70.0 // 70%
+	}
+
+	// Conservative Mode (equity > 1000)
+	if config.RiskManagement.ConservativeMode.MaxConcurrentPositions <= 0 {
+		config.RiskManagement.ConservativeMode.MaxConcurrentPositions = 3
+	}
+	if config.RiskManagement.ConservativeMode.MaxLeverage <= 0 {
+		config.RiskManagement.ConservativeMode.MaxLeverage = 30
+	}
+	if config.RiskManagement.ConservativeMode.MarginUsageLimitPct <= 0 {
+		config.RiskManagement.ConservativeMode.MarginUsageLimitPct = 50.0 // 50%
+	}
+	if config.RiskManagement.ConservativeMode.NotionalCapPct <= 0 {
+		config.RiskManagement.ConservativeMode.NotionalCapPct = 200.0 // 200%
+	}
+	if config.ExecutionGate.MinBestNotionalUsdtLimitOnly <= 0 {
+		config.ExecutionGate.MinBestNotionalUsdtLimitOnly = 50000.0 // 50K USDT
+	}
+	if config.ExecutionGate.MinBestNotionalUsdtLimitPreferred <= 0 {
+		config.ExecutionGate.MinBestNotionalUsdtLimitPreferred = 10000.0 // 10K USDT
+	}
+	if config.ExecutionGate.MaxDepthRatioAbs <= 0 {
+		config.ExecutionGate.MaxDepthRatioAbs = 3.0
+	}
+	if config.ExecutionGate.DefaultModeOnMissing == "" {
+		config.ExecutionGate.DefaultModeOnMissing = "limit_only"
 	}
 
 	// 验证配置

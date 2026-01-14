@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "timestamp": "2025-11-21T12:00:38.761061",
+  "trade_snapshot": {
+    "trade_id": "BTCUSDT_1763683966_1763690775",
+    "symbol": "BTCUSDT",
+    "side": "long",
+    "entry_time": "2025-11-21T08:12:56.448594+08:00",
+    "exit_time": "2025-11-21T10:06:18.344319+08:00",
+    "entry_price": 87048.3,
+    "exit_price": 86719.7,
+    "quantity": 0.002837505155183961,
+    "leverage": 65,
+    "risk_usd": 3.8,
+    "pnl": -0.9324041939934661,
+    "pnl_pct": -0.3774915765155733,
+    "holding_minutes": 113
+  },
+  "position_lifecycle": [
+    {
+      "cycle_number": 66,
+      "timestamp": "2025-11-21T08:12:56.448594+08:00",
+      "action": "open_long",
+      "reasoning": "4h下降趋势但1h斐波那契支撑87891有效，15m突破布林中轨87150且RSI=50.6转强，入场87100，止损86066（前低），TP1=90888（4h斐波那契0.236）概率70%，TP2=93870（0.382）概率60%，TP3=96281（0.5）概率55%，R:R=8.88:1，失败概率35%"
+    },
+    {
+      "cycle_number": 104,
+      "timestamp": "2025-11-21T10:06:18.344319+08:00",
+      "action": "close_long",
+      "reasoning": "4h CHoCH_down确认下降趋势，1h MACD(-1231)持续走弱，RSI(35)弱势区间，15m跌破EMA20支撑。TP3到达概率仅35%<50%要求，反转概率40%较高，4h布林带下轨86771关键支撑测试中，趋势结构破坏明显，优先止损控制风险。"
+    }
+  ],
+  "market_context": {
+    "account_state": {
+      "total_balance": 44.95587408,
+      "available_balance": 40.95248994,
+      "total_unrealized_profit": -55.04412592,
+      "position_count": 1,
+      "margin_used_pct": 8.911591752749416
+    },
+    "market_data": {}
+  },
+  "cot_trace": "Cycle66 入场：4h下降趋势但1h斐波那契支撑87891有效，15m突破布林中轨87150且RSI=50.6转强，入场87100，止损86066（前低），TP1=90888（4h斐波那契0.236）概率70%，TP2=93870（0.382）概率60%，TP3=96281（0.5）概率55%，R:R=8.88:1，失败概率35%\nCycle104 平仓：4h CHoCH_down确认下降趋势，1h MACD(-1231)持续走弱，RSI(35)弱势区间，15m跌破EMA20支撑。TP3到达概率仅35%<50%要求，反转概率40%较高，4h布林带下轨86771关键支撑测试中，趋势结构破坏明显，优先止损控制风险。",
+  "review": {
+    "trade_id": "BTCUSDT_1763683966_1763690775",
+    "symbol": "BTCUSDT",
+    "side": "long",
+    "pnl": -0.9324041939934661,
+    "pnl_pct": -0.3774915765155733,
+    "holding_minutes": 113,
+    "risk_score": 60,
+    "execution_score": 70,
+    "signal_score": 55,
+    "summary": "BTCUSDT多单亏损-0.38%，持仓113分钟。入场87048.3，出场86719.7。4h下降趋势中逆势做多，TP3到达概率仅35%低于50%要求，反转概率40%较高，最终止损离场。",
+    "what_went_well": [
+      "及时止损，避免了更大亏损",
+      "风险控制到位，亏损幅度较小(-0.38%)"
+    ],
+    "improvements": [
+      "避免在4h下降趋势中逆势做多，应等待趋势反转信号",
+      "开仓前需确保TP3到达概率≥50%，本次仅35%不符合要求",
+      "加强多周期共振确认，4h/1h/15m均呈弱势时应避免开多"
+    ],
+    "root_cause": "在4h明确下降趋势(CHoCH_down)中逆势做多，缺乏足够的技术支撑。入场时1h MACD已处于深度负值(-1231)，15m跌破EMA20，多周期均呈弱势。TP3到达概率仅35%低于50%开仓要求，但系统仍执行了开仓，说明入场条件检查不够严格。",
+    "extreme_intervention_review": "",
+    "action_items": [
+      {
+        "owner": "ai_trader",
+        "item": "加强开仓前TP3概率检查，确保≥50%才允许开仓",
+        "due": "immediate"
+      },
+      {
+        "owner": "ai_trader",
+        "item": "在4h下降趋势中禁止逆势做多，需等待明确的趋势反转信号",
+        "due": "immediate"
+      }
+    ],
+    "confidence": 75,
+    "reasoning": "信号质量：入场时4h CHoCH_down确认下降趋势，1h MACD(-1231)深度负值，15m跌破EMA20，多周期共振偏空，信号质量评分55分。执行质量：及时止损离场，执行评分70分。风险管理：亏损控制在-0.38%，风险评分60分。根本原因：逆势交易且TP3概率不足，应加强入场条件检查。"
+  }
+}

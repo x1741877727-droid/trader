@@ -37,6 +37,29 @@ export interface Position {
   unrealized_pnl_pct: number;
   liquidation_price: number;
   margin_used: number;
+  // 止损止盈字段（可选，可能为空）
+  stop_loss?: number;
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
+}
+
+export interface PendingOrder {
+  symbol: string;
+  side: string;
+  limit_price: number;
+  quantity: number;
+  leverage: number;
+  order_id: number;
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
+  stop_loss?: number;
+  take_profit?: number;
+  create_time?: number;
+  duration_min?: number;
+  confidence?: number;
+  reasoning?: string;
 }
 
 // 决策动作
@@ -53,6 +76,13 @@ export interface DecisionAction {
 }
 
 // 决策记录
+// 验证错误详情
+export interface ValidationError {
+  symbol: string;
+  action: string;
+  reason: string;
+}
+
 export interface DecisionRecord {
   timestamp: string;
   cycle_number: number;
@@ -81,6 +111,10 @@ export interface DecisionRecord {
   execution_log: string[];
   success: boolean;
   error_message: string;
+  status?: string; // "ok" | "warning" | "error"
+  error_type?: string;
+  error_severity?: string; // "warning" | "error"
+  validation_errors?: ValidationError[];
 }
 
 // 统计信息

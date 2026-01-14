@@ -1,0 +1,50 @@
+════ 模块：DecisionChecklist（开仓自检 ）════
+
+目的
+- 在最终输出决策前，快速且全面地自检关键要点：确认思路完整、JSON 字段齐全、并标注后端需校验的 RISK id。尽量保持简洁，便于 AI/审计阅读与后端校验。
+
+使用规则
+- **🚨 强制要求：绝对不能只输出思维链而不输出JSON！** 即使所有分析结果都是wait，也必须为每个候选币种输出JSON格式的决策，否则系统无法解析！
+
+开仓自检步骤（简短逐项）
+1) 持仓上下文（必须）
+  - 当前持仓 / 待成交 / 剩余空位（若无空位 → wait）
+2) 市场状态（必须）
+  - 是否明确：趋势 / 震荡 / 不确定？（引用 MarketStateAndTrend）
+  - 是否列出 1–2 条关键证据支持判断？
+3) 策略与阶段（必须）
+  - 明确策略 A/B/C/D/E 与一句话理由（基于 market_state + trend_phase）
+4) 入场触发（必须）
+  - 是否给出语义触发条件（如“回落至4h支撑并15m确认”）？
+  - 是否给出 stop_anchor（结构性描述）？若无法给出 stop_price → wait
+5) JSON 必填字段（必须）
+  - 包含 OutputFormat 最小字段：version/action/symbol/leverage/position_size_usd/stop_price/tp1/tp2/tp3/confidence/reasoning
+ - **daily_pair_trades**（必须）：在 context 中提供该币种今日已开单数（市价+限价），AI 必须在 CoT（思维链）中读取并展示该值；在 JSON.reasoning 单行摘要中可简短写明 `daily_pair_trades={n}`；若达到或超过每日上限（提示词中设定的 MAX_DAILY_PER_PAIR）→ 必须返回 action=wait 并在 CoT 与 JSON.reasoning 中说明。
+ - **reasoning 格式要求**：JSON 中的 `reasoning` 字段必须为一句话的简短结论（不占多行）；详细分析与证据请放在 CoT（思维链）部分且紧接在 JSON 之前输出。
+ 
+强制数值计算与输出要求（必须）：
+- 在 CoT（思维链）中必须逐步写出并展示数值计算步骤：
+  1) entry = <数值>
+  2) stop = <数值>
+  3) target = <数值>
+  4) risk = |entry - stop|
+  5) reward = |target - entry|
+  6) rr = reward / risk
+- 紧接 CoT 输出后，必须提供单行机器可读 JSON，包含数值字段：`"entry","stop","target","risk","reward","rr"`（值需与 CoT 中逐步计算一致）。若不一致或缺失字段，必须返回 `action=error` 并在 CoT 说明差异，等待修正或后端核验通过。
+6) 风险摘要与保证金意向（必须）
+  - 在 CoT（思维链）中写出 equity / available / plan_margin（拟）并展示关键计算步骤；JSON.reasoning 仅保留单行关键数值摘要，说明 final_margin 将由后端按 RISK:MAX_MARGIN_PCT 计算
+  - 列出 required_checks（RISK ids），例如 ["RISK:MIN_RR","RISK:MAX_MARGIN_PCT","RISK:DAILY_LIMIT"]
+7) TP 概率与 R:R（必须）
+  - 给出 TP1/TP2/TP3 的估计概率（%）与简要依据
+  - 以一句话显示 R:R 的计算结果与是否满足（后端最终校验）
+8) 小周期确认（必须）
+  - 检查 15m/5m 的技术指标与触发信号，说明其对入场的支持或否决作用
+9) 衍生品/流动性提示（建议）
+  - 若 OI/funding/taker/large_taker_volume 异常，写明对仓位或下单方式的影响
+10) 失败条件与即时动作（必须）
+  - 明确失败触发条件与 immediate_action（如 "price < stop_price → immediate_flat"）；缺失则 wait
+11) 最终校验（必须）
+  - CoT 是否覆盖上述要点？JSON 是否完整且紧随 CoT？若不满足 → action=wait 并在 reasoning 列出缺项
+
+
+

@@ -61,6 +61,10 @@ nofx/
 ├── decision_logs/                  # Decision log storage (JSON files)
 │   ├── {trader_id}/                # Per-trader logs
 │   └── {timestamp}.json            # Individual decisions
+├── close_reviews/                  # Post-trade review artifacts
+│   └── {trader_id}/{trade_id}.json # request_snapshot + major_decisions + review
+├── prompts/                        # Prompt templates
+│   └── modules/                    # Modular snippets (e.g. MarketStateAndTrend.txt)
 │
 └── web/                            # React frontend
     ├── src/
@@ -198,6 +202,12 @@ type ExchangeClient interface {
 Historical Data → Prompt Generation → AI API Call →
 Decision Parsing → Risk Validation → Execution
 ```
+
+**Close Review Outputs:**
+- `close_reviews/<trader_id>/<trade_id>.json` captures `request_snapshot`, `major_decisions`, and the AI-written review/action items.
+- `/api/cycle-check` streams the latest entries from `decision_logs/` so operators can diff the raw request against the AI response.
+- `/api/close-reviews` + `/api/trades/:trade_id/close-review` expose (and accept) the JSON artifacts for the frontend modal and for automation.
+- Prompt modules used to craft these requests live under `prompts/modules/` (`MarketStateAndTrend.txt`, etc.), so updating a module immediately affects the request snapshot.
 
 ---
 

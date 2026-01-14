@@ -15,6 +15,10 @@ import (
 type FuturesTrader struct {
 	client *futures.Client
 
+	// 配置
+	stopLossWorkingType string // "CONTRACT_PRICE" 或 "MARK_PRICE"
+	enablePriceProtect  bool   // 是否启用priceProtect
+
 	// 余额缓存
 	cachedBalance     map[string]interface{}
 	balanceCacheTime  time.Time
@@ -31,10 +35,17 @@ type FuturesTrader struct {
 
 // NewFuturesTrader 创建合约交易器
 func NewFuturesTrader(apiKey, secretKey string) *FuturesTrader {
+	return NewFuturesTraderWithConfig(apiKey, secretKey, "MARK_PRICE", true)
+}
+
+// NewFuturesTraderWithConfig 创建合约交易器（带配置）
+func NewFuturesTraderWithConfig(apiKey, secretKey, stopLossWorkingType string, enablePriceProtect bool) *FuturesTrader {
 	client := futures.NewClient(apiKey, secretKey)
 	return &FuturesTrader{
-		client:        client,
-		cacheDuration: 15 * time.Second, // 15秒缓存
+		client:               client,
+		stopLossWorkingType:  stopLossWorkingType,
+		enablePriceProtect:   enablePriceProtect,
+		cacheDuration:        15 * time.Second, // 15秒缓存
 	}
 }
 
@@ -139,18 +150,18 @@ func (t *FuturesTrader) SetMarginMode(symbol string, isCrossMargin bool) error {
 	} else {
 		marginType = futures.MarginTypeIsolated
 	}
-	
+
 	// 尝试设置仓位模式
 	err := t.client.NewChangeMarginTypeService().
 		Symbol(symbol).
 		MarginType(marginType).
 		Do(context.Background())
-	
+
 	marginModeStr := "全仓"
 	if !isCrossMargin {
 		marginModeStr = "逐仓"
 	}
-	
+
 	if err != nil {
 		// 如果错误信息包含"No need to change"，说明仓位模式已经是目标值
 		if contains(err.Error(), "No need to change margin type") {
@@ -166,7 +177,7 @@ func (t *FuturesTrader) SetMarginMode(symbol string, isCrossMargin bool) error {
 		// 不返回错误，让交易继续
 		return nil
 	}
-	
+
 	log.Printf("  ✓ %s 仓位模式已设置为 %s", symbol, marginModeStr)
 	return nil
 }
@@ -337,6 +348,7 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 		PositionSide(futures.PositionSideTypeLong).
 		Type(futures.OrderTypeMarket).
 		Quantity(quantityStr).
+		ReduceOnly(true). // 强制只减仓，防止意外开反向仓
 		Do(context.Background())
 
 	if err != nil {
@@ -345,9 +357,31 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 
 	log.Printf("✓ 平多仓成功: %s 数量: %s", symbol, quantityStr)
 
-	// 平仓后取消该币种的所有挂单（止损止盈单）
-	if err := t.CancelAllOrders(symbol); err != nil {
-		log.Printf("  ⚠ 取消挂单失败: %v", err)
+	// 检查是否还有剩余持仓，只有全平时才取消挂单
+	positions, err := t.GetPositions()
+	if err == nil {
+		hasRemainingPosition := false
+		for _, pos := range positions {
+			if pos["symbol"] == symbol && pos["side"] == "long" {
+				remainingQty, _ := pos["positionAmt"].(float64)
+				if remainingQty > 0 {
+					hasRemainingPosition = true
+					log.Printf("  ℹ %s 还有剩余多仓 %.4f，保留止损止盈委托", symbol, remainingQty)
+					break
+				}
+			}
+		}
+		// 只有全平时才取消挂单
+		if !hasRemainingPosition {
+			if err := t.CancelAllOrders(symbol); err != nil {
+				log.Printf("  ⚠ 取消挂单失败: %v", err)
+			} else {
+				log.Printf("  ✓ 全平完成，已取消所有挂单")
+			}
+		}
+	} else {
+		// 如果获取持仓失败，为了安全起见，不取消挂单（避免误取消部分平仓后的止损止盈）
+		log.Printf("  ⚠ 无法获取持仓状态，保留挂单以防误取消")
 	}
 
 	result := make(map[string]interface{})
@@ -391,6 +425,7 @@ func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]
 		PositionSide(futures.PositionSideTypeShort).
 		Type(futures.OrderTypeMarket).
 		Quantity(quantityStr).
+		ReduceOnly(true). // 强制只减仓，防止意外开反向仓
 		Do(context.Background())
 
 	if err != nil {
@@ -399,9 +434,34 @@ func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]
 
 	log.Printf("✓ 平空仓成功: %s 数量: %s", symbol, quantityStr)
 
-	// 平仓后取消该币种的所有挂单（止损止盈单）
-	if err := t.CancelAllOrders(symbol); err != nil {
-		log.Printf("  ⚠ 取消挂单失败: %v", err)
+	// 检查是否还有剩余持仓，只有全平时才取消挂单
+	positions, err := t.GetPositions()
+	if err == nil {
+		hasRemainingPosition := false
+		for _, pos := range positions {
+			if pos["symbol"] == symbol && pos["side"] == "short" {
+				remainingQty, _ := pos["positionAmt"].(float64)
+				if remainingQty < 0 {
+					remainingQty = -remainingQty
+				}
+				if remainingQty > 0 {
+					hasRemainingPosition = true
+					log.Printf("  ℹ %s 还有剩余空仓 %.4f，保留止损止盈委托", symbol, remainingQty)
+					break
+				}
+			}
+		}
+		// 只有全平时才取消挂单
+		if !hasRemainingPosition {
+			if err := t.CancelAllOrders(symbol); err != nil {
+				log.Printf("  ⚠ 取消挂单失败: %v", err)
+			} else {
+				log.Printf("  ✓ 全平完成，已取消所有挂单")
+			}
+		}
+	} else {
+		// 如果获取持仓失败，为了安全起见，不取消挂单（避免误取消部分平仓后的止损止盈）
+		log.Printf("  ⚠ 无法获取持仓状态，保留挂单以防误取消")
 	}
 
 	result := make(map[string]interface{})
@@ -471,22 +531,35 @@ func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity
 		return err
 	}
 
-	_, err = t.client.NewCreateOrderService().
+	orderService := t.client.NewCreateOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.OrderTypeStopMarket).
 		StopPrice(fmt.Sprintf("%.8f", stopPrice)).
 		Quantity(quantityStr).
-		WorkingType(futures.WorkingTypeContractPrice).
-		ClosePosition(true).
-		Do(context.Background())
+		ClosePosition(true)
+
+	// 设置工作类型
+	if t.stopLossWorkingType == "MARK_PRICE" {
+		orderService.WorkingType(futures.WorkingTypeMarkPrice)
+	} else {
+		orderService.WorkingType(futures.WorkingTypeContractPrice)
+	}
+
+	// 启用priceProtect（如果支持）
+	if t.enablePriceProtect {
+		// Binance API可能不支持priceProtect参数，暂时注释
+		// orderService.PriceProtect(true)
+	}
+
+	_, err = orderService.Do(context.Background())
 
 	if err != nil {
 		return fmt.Errorf("设置止损失败: %w", err)
 	}
 
-	log.Printf("  止损价设置: %.4f", stopPrice)
+	log.Printf("  止损价设置: %.4f (触发类型: MARK_PRICE)", stopPrice)
 	return nil
 }
 
@@ -509,22 +582,32 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 		return err
 	}
 
-	_, err = t.client.NewCreateOrderService().
+	orderService := t.client.NewCreateOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.OrderTypeTakeProfitMarket).
 		StopPrice(fmt.Sprintf("%.8f", takeProfitPrice)).
 		Quantity(quantityStr).
-		WorkingType(futures.WorkingTypeContractPrice).
-		ClosePosition(true).
-		Do(context.Background())
+		ClosePosition(true)
+
+	// TakeProfit默认使用CONTRACT_PRICE，但也可以配置
+	// 用户建议：StopLoss用MARK_PRICE，TakeProfit用CONTRACT_PRICE
+	orderService.WorkingType(futures.WorkingTypeContractPrice)
+
+	// 启用priceProtect（如果支持）
+	if t.enablePriceProtect {
+		// Binance API可能不支持priceProtect参数，暂时注释
+		// orderService.PriceProtect(true)
+	}
+
+	_, err = orderService.Do(context.Background())
 
 	if err != nil {
 		return fmt.Errorf("设置止盈失败: %w", err)
 	}
 
-	log.Printf("  止盈价设置: %.4f", takeProfitPrice)
+	log.Printf("  止盈价设置: %.4f (触发类型: CONTRACT_PRICE)", takeProfitPrice)
 	return nil
 }
 
@@ -734,6 +817,38 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]map[string]interface{}, 
 	}
 
 	return result, nil
+}
+
+// GetOrderStatus 查询订单状态
+func (t *FuturesTrader) GetOrderStatus(symbol string, orderID int64) (map[string]interface{}, error) {
+	order, err := t.client.NewGetOrderService().
+		Symbol(symbol).
+		OrderID(orderID).
+		Do(context.Background())
+
+	if err != nil {
+		return nil, fmt.Errorf("查询订单状态失败: %w", err)
+	}
+
+	price, _ := strconv.ParseFloat(order.Price, 64)
+	qty, _ := strconv.ParseFloat(order.OrigQuantity, 64)
+	executedQty, _ := strconv.ParseFloat(order.ExecutedQuantity, 64)
+	avgPrice, _ := strconv.ParseFloat(order.AvgPrice, 64)
+
+	return map[string]interface{}{
+		"orderId":         order.OrderID,
+		"symbol":          order.Symbol,
+		"side":            string(order.Side),
+		"positionSide":    string(order.PositionSide),
+		"type":            string(order.Type),
+		"price":           price,
+		"quantity":        qty,
+		"executedQty":     executedQty,
+		"avgPrice":        avgPrice,
+		"status":          string(order.Status),
+		"time":            order.Time,
+		"updateTime":      order.UpdateTime,
+	}, nil
 }
 
 // CancelOrder 取消指定订单

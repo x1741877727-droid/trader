@@ -1,0 +1,53 @@
+════ 模块：TradingStrategyMatrix（策略矩阵 — 框架版）════
+
+【定位与作用】
+- 本模块仅提供“策略框架与决策模板”，不包含任何量化阈值或具体百分比（这些由 `RiskManagement.txt` 提供）。
+- 目标：给出策略语义、所需证据字段、入场/风控框架模板与标准化输出模板，供 AI 根据 Structure/Chan/Indicators 的证据自主生成具体执行内容。
+
+【核心约束（职责边界）】
+- 不做市场状态判定（MarketStateAndTrend 负责）；不做结构识别（StructureRules/ChanTheory 负责）；不做数值校验（RiskManagement 负责）。
+- 策略矩阵只消费其它模块的结构化输出字段，按“证据集合 → 策略匹配 → 框架输出”流程运行。
+- 若策略建议与 CoreTradingRules 的硬性条件冲突，必须返回 action=wait 并在 CoT（思维链）中说明冲突点；JSON.reasoning 保留单行摘要。
+
+【策略集合（语义描述 + 证据依赖）】
+- 策略A：趋势市 × Early（突破后回踩，右侧优先）
+  * 语义：在趋势起点确认后，优先等待右侧回踩确认再入场。
+  * 需读取证据字段：TrendPhase.trend_strength_4h、PriceAction4h.LastSignal、MidTermSeries15m.MACDValues、MidTermSeries15m.RSI7Values、RiskMetrics.atr14_percent_of_price。
+  * 框架输出：entry_plan（trigger: 语义化条件）、risk_plan（stop_anchor 类型）、sizing_hint（映射至 RiskManagement）。
+
+- 策略B：趋势市 × Mid（趋势中段，顺势延续）
+  * 语义：在趋势中段寻找二次回调或节奏点加仓。
+  * 需读取证据字段：TrendPhase.trend_strength_4h、PriceAction4h.LastSignal、VolumePercentile15m、PriceAction15m.LastSignal。
+  * 框架输出：entry_plan、risk_plan、sizing_hint、TP_priority（偏重 TP1/TP2）。
+
+- 策略C：趋势市 × Late（趋势尾声，保护优先）
+  * 语义：以保护利润与寻找高置信度反向机会为主；反向或左侧单仅作例外且极小仓。
+  * 需读取证据字段：TrendPhase.trend_strength_4h、DistanceToATH、MidTermSeries4h.RSI14Values、DerivativesAlert.funding_rate_level。
+  * 框架输出：defensive_plan（减仓/保护）、exception_requirements（反向入场必须满足的证据清单）。
+
+- 策略D：震荡市（区间交易）
+  * 语义：明确区间边界，边界交易或小仓试探；中部默认 wait。
+  * 需读取证据字段：TrendPhase.confidence、MidTermSeries4h.Bollinger.percent、MidTermSeries4h.ADX、ICTPremiumDiscount.pos_pct。
+  * 框架输出：edge_entry_plan、probe_limits、max_attempts_per_symbol（次数限制，避免过度试探）。
+
+- 策略E：不确定（等待）
+  * 语义：市场状态或证据不足时优先等待；必须提供明确等待条件与最佳入场计划。
+  * 需读取证据字段：多个指标冲突信号（TrendPhase.confidence < 60、PriceAction.LastSignal="none"等）。
+  * 框架输出：wait（包含触发条件与备选入场价）。
+
+【策略选择流程（简洁）】
+1. 模块只列出“策略选择逻辑与所需证据字段”。实际的市场状态判定由 `MarketStateAndTrend` 提供并作为输入。
+2. AI 基于这些输入匹配最合适策略并在 CoT（思维链）中明确回答：strategy_choice、evidence（至少3条不同来源）、confidence；JSON.reasoning 保留单行摘要。
+3. 若选择反向/例外操作，必须在 JSON 中填充 `exception_reason` 和 `additional_risk_controls`。
+
+
+
+【冲突处理与自检】
+- 策略矩阵不解决冲突：遇冲突时输出明确的冲突描述（哪些证据互相矛盾）并指示优先级（遵守 CoreTradingRules 硬性项）。
+- 输出前 AI 必须自检并在 DecisionChecklist 中满足 JSON 字段完整性与 RiskManagement 校验接口要求；若任一校验未通过，输出 action=wait。
+
+【对后端/流程层的说明】
+- 策略矩阵只负责建议与框架；真正发动开仓/平仓/更新止损由流程层（OpenSetup/HoldPlaybook/PositionManagement）决定并调用后端校验。
+
+
+

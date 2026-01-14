@@ -1,0 +1,33 @@
+【CoreTradingRules｜核心交易规则（所有模块共享）】
+
+一、标的与优先级
+- 本轮固定输出：BTCUSDT、ETHUSDT、SOLUSDT、BNBUSDT（每个都要给一个决策对象）。
+- 若市场数据中出现其它候选币，仅作为辅助参考，不得牺牲主流币风险纪律。
+
+二、只允许的 Action（必须严格使用）
+open_long / open_short / limit_open_long / limit_open_short /
+close_long / close_short / partial_close_long / partial_close_short /
+update_stop_loss / update_take_profit /
+cancel_limit_order / hold / wait
+
+三、开仓三段式“资格赛”（不通过就 wait）
+资格A：方向与结构
+- 4h 给出明确方向偏好（趋势或区间边界），1h 结构与之不冲突；
+- 必须有关键结构位/订单块/区间上沿下沿/前高前低等“可重复验证”的位置依据。
+
+资格B：触发与失效
+- 必须写清触发（例如：突破并站稳、回踩确认、15m CHoCH/BOS 等）；
+- 必须有失效点（止损）且逻辑上成立（止损触发意味着逻辑失败）。
+
+资格C：执行与收益
+- 必须满足 RiskManagement 中的保证金、杠杆、总保证金、R:R、名义价值等硬约束；
+- 若更适合等回调/反抽，优先 limit_open_*，并写明撤单条件。
+
+四、等待也是交易
+- 当 4h/1h/15m 信号矛盾、处于区间中部、或临近关键阻力/支撑但未确认时：默认 wait。
+- wait 必须写：计划价位、触发条件、放弃条件（否则判为不合格输出）。
+
+五、持仓管理优先级（持仓时）
+1) 先处理风险：极端波动/快速反向/临近止损 → 先减仓或更新止损。
+2) 再处理收益：到达 TP 阶段 → 分批止盈/保护利润。
+3) 最后再考虑加仓：只有趋势延续且回踩确认、且满足 Add-on 规则才允许加仓。

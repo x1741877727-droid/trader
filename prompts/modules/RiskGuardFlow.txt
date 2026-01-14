@@ -1,0 +1,43 @@
+【RiskGuard-Flow｜风险门控流程（必须逐步执行）】
+
+你必须按以下顺序做“硬门控”，任何一步不通过 → 本币种决策只能是 wait/hold/减仓/撤单。
+
+Step 0｜输入理解
+- 账户净值 TotalEquity、可用余额、当前保证金使用率、每日开单计数 daily_pair_trades、当前持仓与待成交限价单。
+- 关键语义：position_size_usd = 保证金；notional = 保证金 × 杠杆。
+
+Step 1｜持仓/挂单容量门控
+- 当前持仓数是否 < 最大持仓数（由系统给出 positions token）。
+- 若同币种已有持仓或挂单：默认不再新开同向单，除非明确是“加仓”且满足 Add-on 规则。
+
+Step 2｜当日交易频率门控（防过度交易）
+- 若该币种当日已开 2 单：禁止再开（除非机会质量=S 且 confidence≥90）。
+- 若已开 1 单：开新仓必须更严格（机会质量≥A 且 confidence≥85），否则 wait。
+
+Step 3｜风险参数门控（硬约束）
+对任何 open_* / limit_open_* 必须同时满足：
+- 杠杆范围：主流币/山寨币分别按 RiskManagement 规定；
+- 保证金范围：必须在最小~最大区间；
+- 总保证金：新增后仍需 ≤ 上限；
+- 名义价值：notional ≥ 20U；
+- R:R：达到最低要求；
+- 止损/止盈方向关系正确（多：SL < TP；空：SL > TP）；
+- TP1/TP2/TP3 必须提供，且 take_profit 必须等于 tp3。
+
+Step 4｜市场环境“红旗”门控（资深交易员习惯）
+出现以下任一红旗，必须降级为 wait 或使用限价，且降低仓位：
+- 4h/1h/15m 明显冲突，且处于区间中轴（无边界优势）
+- 15m 极端拉升/瀑布后无结构回踩确认
+- 关键阻力/支撑附近但未给出有效突破/回踩
+- OI/资金费率与价格背离明显（若数据存在且指向反向挤压风险）
+
+Step 5｜输出校验（避免 decision_validation_failed）
+在输出 JSON 前做一次“自检”：
+- position_size_usd 是否真的是保证金（通常应是 TotalEquity 的若干百分比，不会是几百上千）
+- take_profit 是否等于 tp3
+- limit_open_* 是否提供 limit_price
+- cancel_limit_order 是否提供 order_id
+- update_stop_loss 是否提供 new_stop_loss
+- partial_close_* 是否提供 close_ratio 或 close_quantity
+
+通过以上门控后，才允许进入 TradingStrategyMatrix 与 OpportunityScoring 做最终策略选择。

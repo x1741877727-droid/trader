@@ -1,0 +1,40 @@
+【DecisionChecklist｜最终自检（输出前必须过一遍）】
+
+在输出 JSON 前，快速检查：
+
+1) 思维链是否包含字符 [ 或 ] ？
+- 若包含，必须改写（否则解析可能失败）。
+
+2) JSON 是否只输出一次、且不使用 ``` 包裹？
+- 必须满足。
+
+3) 是否覆盖所有会被分析的 symbol：
+- 所有持仓 symbol
+- 所有 pending order symbol
+- 候选币种中的前N个 symbol
+- 每个 symbol 一个对象
+
+4) action 是否属于允许集合？
+
+5) 开仓字段是否齐全：
+- leverage、position_size_usd（保证金）、stop_loss、tp1/tp2/tp3、take_profit、confidence、risk_usd、reasoning
+- 限价单是否包含 limit_price？
+
+6) 多空逻辑是否正确：
+- 多单 stop_loss < take_profit
+- 空单 stop_loss > take_profit
+
+7) 是否避免卡边界：
+- 保证金建议落在账户净值的 6%-12%（后端校验5%-13%，有边界稳定机制自动夹紧）
+
+8) execution.mode 是否被尊重：
+- limit_only 必须 limit_open_* 或 wait
+- 点差大/深度差优先 limit 或 wait
+
+9) 分层风控是否遵守：
+- 小资金(≤200U)：仅BTC/ETH/SOL，高杠杆需S/A级机会
+- 中等资金(200-1000U)：杠杆≤75，注重资金管理
+- 大资金(>1000U)：杠杆≤30，强化风险控制
+- 高杠杆仅在funding/OI无风险+execution_gate许可时使用
+
+通过后再输出。

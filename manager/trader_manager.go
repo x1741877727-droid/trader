@@ -14,14 +14,16 @@ import (
 
 // TraderManager 管理多个trader实例
 type TraderManager struct {
-	traders map[string]*trader.AutoTrader // key: trader ID
-	mu      sync.RWMutex
+	traders      map[string]*trader.AutoTrader // key: trader ID
+	globalConfig *config.Config                // 全局配置
+	mu           sync.RWMutex
 }
 
 // NewTraderManager 创建trader管理器
-func NewTraderManager() *TraderManager {
+func NewTraderManager(globalConfig *config.Config) *TraderManager {
 	return &TraderManager{
-		traders: make(map[string]*trader.AutoTrader),
+		traders:      make(map[string]*trader.AutoTrader),
+		globalConfig: globalConfig,
 	}
 }
 
@@ -205,6 +207,7 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 		Name:                  traderCfg.Name,
 		AIModel:               aiModelCfg.Provider, // 使用provider作为模型标识
 		Exchange:              exchangeCfg.ID,      // 使用exchange ID
+		TraderMode:            traderCfg.TraderMode, // 纸交易或真实交易
 		BinanceAPIKey:         "",
 		BinanceSecretKey:      "",
 		HyperliquidPrivateKey: "",
@@ -221,6 +224,12 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 		AltcoinLeverage:       traderCfg.AltcoinLeverage,
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
+		// M2.2: 限价订单生命周期管理默认配置
+		LimitOrderWaitSeconds:     10,
+		LimitOrderMaxRetries:      3,
+		LimitOrderPollIntervalMs:  300,
+		CancelOnPartialFill:       false,
+		PostOnlyWhenLimitOnly:     true,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
 		IsCrossMargin:         traderCfg.IsCrossMargin,
 		DefaultCoins:          defaultCoins,
@@ -249,7 +258,7 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 	}
 
 	// 创建trader实例
-	at, err := trader.NewAutoTrader(traderConfig)
+	at, err := trader.NewAutoTrader(traderConfig, tm.globalConfig)
 	if err != nil {
 		return fmt.Errorf("创建trader失败: %w", err)
 	}
@@ -355,7 +364,7 @@ func (tm *TraderManager) AddTraderFromDB(traderCfg *config.TraderRecord, aiModel
 	}
 
 	// 创建trader实例
-	at, err := trader.NewAutoTrader(traderConfig)
+	at, err := trader.NewAutoTrader(traderConfig, tm.globalConfig)
 	if err != nil {
 		return fmt.Errorf("创建trader失败: %w", err)
 	}
@@ -765,7 +774,7 @@ func (tm *TraderManager) loadSingleTrader(traderCfg *config.TraderRecord, aiMode
 	}
 
 	// 创建trader实例
-	at, err := trader.NewAutoTrader(traderConfig)
+	at, err := trader.NewAutoTrader(traderConfig, tm.globalConfig)
 	if err != nil {
 		return fmt.Errorf("创建trader失败: %w", err)
 	}

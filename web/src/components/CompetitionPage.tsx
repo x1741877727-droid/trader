@@ -31,6 +31,13 @@ export function CompetitionPage() {
       setIsModalOpen(true);
     } catch (error) {
       console.error('Failed to fetch trader config:', error);
+      const errorMessage = error instanceof Error ? error.message : t('getTraderConfigFailed', language);
+      // 检查是否是配置不存在的情况
+      if (errorMessage.includes('no rows in result set') || errorMessage.includes('获取交易员配置失败')) {
+        alert(t('getTraderConfigFailed', language) + ': ' + (errorMessage.includes('no rows') ? '交易员配置不存在或关联的AI模型/交易所已被删除' : errorMessage));
+      } else {
+        alert(errorMessage);
+      }
     }
   };
 
@@ -186,7 +193,7 @@ export function CompetitionPage() {
                           {trader.position_count}
                         </div>
                         <div className="text-xs" style={{ color: '#848E9C' }}>
-                          {trader.margin_used_pct.toFixed(1)}%
+                          {(trader.margin_used_pct ?? 0).toFixed(1)}%
                         </div>
                       </div>
 

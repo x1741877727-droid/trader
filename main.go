@@ -8,6 +8,7 @@ import (
 	"nofx/auth"
 	"nofx/config"
 	"nofx/manager"
+	"nofx/market"
 	"nofx/pool"
 	"os"
 	"os/signal"
@@ -37,6 +38,55 @@ type ConfigFile struct {
 	JWTSecret          string         `json:"jwt_secret"`
 }
 
+// syncGlobalConfigFromDatabase 从数据库同步配置到全局Config结构
+func syncGlobalConfigFromDatabase(globalConfig *config.Config, database *config.Database) error {
+	// 从数据库读取配置项并填充到globalConfig
+	// 这里主要设置RiskManagement的默认值，实际配置可以通过API或数据库管理
+
+	// 设置默认的分层风控配置
+	globalConfig.RiskManagement = config.RiskManagementConfig{
+		AggressiveMode: struct {
+			MaxConcurrentPositions int      `json:"max_concurrent_positions"`
+			AllowedSymbols         []string `json:"allowed_symbols"`
+			MaxLeverage            int      `json:"max_leverage"`
+			MinLeverage            int      `json:"min_leverage"`
+			RiskUsdMinPct          float64  `json:"risk_usd_min_pct"`
+			RiskUsdMaxPct          float64  `json:"risk_usd_max_pct"`
+			DailyLossLimitPct      float64  `json:"daily_loss_limit_pct"`
+		}{
+			MaxConcurrentPositions: 1,
+			AllowedSymbols:         []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"},
+			MaxLeverage:            100,
+			MinLeverage:            40,
+			RiskUsdMinPct:          8.0,
+			RiskUsdMaxPct:          15.0,
+			DailyLossLimitPct:      15.0,
+		},
+		StandardMode: struct {
+			MaxConcurrentPositions int     `json:"max_concurrent_positions"`
+			MaxLeverage            int     `json:"max_leverage"`
+			MarginUsageLimitPct    float64 `json:"margin_usage_limit_pct"`
+		}{
+			MaxConcurrentPositions: 2,
+			MaxLeverage:            75,
+			MarginUsageLimitPct:    70.0,
+		},
+		ConservativeMode: struct {
+			MaxConcurrentPositions int     `json:"max_concurrent_positions"`
+			MaxLeverage            int     `json:"max_leverage"`
+			MarginUsageLimitPct    float64 `json:"margin_usage_limit_pct"`
+			NotionalCapPct         float64 `json:"notional_cap_pct"`
+		}{
+			MaxConcurrentPositions: 3,
+			MaxLeverage:            30,
+			MarginUsageLimitPct:    50.0,
+			NotionalCapPct:         200.0,
+		},
+	}
+
+	return nil
+}
+
 // syncConfigToDatabase 从config.json读取配置并同步到数据库
 func syncConfigToDatabase(database *config.Database) error {
 	// 检查config.json是否存在
@@ -61,14 +111,14 @@ func syncConfigToDatabase(database *config.Database) error {
 
 	// 同步各配置项到数据库
 	configs := map[string]string{
-		"admin_mode":            fmt.Sprintf("%t", configFile.AdminMode),
-		"api_server_port":       strconv.Itoa(configFile.APIServerPort),
-		"use_default_coins":     fmt.Sprintf("%t", configFile.UseDefaultCoins),
-		"coin_pool_api_url":     configFile.CoinPoolAPIURL,
-		"oi_top_api_url":        configFile.OITopAPIURL,
-		"max_daily_loss":        fmt.Sprintf("%.1f", configFile.MaxDailyLoss),
-		"max_drawdown":          fmt.Sprintf("%.1f", configFile.MaxDrawdown),
-		"stop_trading_minutes":  strconv.Itoa(configFile.StopTradingMinutes),
+		"admin_mode":           fmt.Sprintf("%t", configFile.AdminMode),
+		"api_server_port":      strconv.Itoa(configFile.APIServerPort),
+		"use_default_coins":    fmt.Sprintf("%t", configFile.UseDefaultCoins),
+		"coin_pool_api_url":    configFile.CoinPoolAPIURL,
+		"oi_top_api_url":       configFile.OITopAPIURL,
+		"max_daily_loss":       fmt.Sprintf("%.1f", configFile.MaxDailyLoss),
+		"max_drawdown":         fmt.Sprintf("%.1f", configFile.MaxDrawdown),
+		"stop_trading_minutes": strconv.Itoa(configFile.StopTradingMinutes),
 	}
 
 	// 同步default_coins（转换为JSON字符串存储）
@@ -133,11 +183,11 @@ func main() {
 	useDefaultCoinsStr, _ := database.GetSystemConfig("use_default_coins")
 	useDefaultCoins := useDefaultCoinsStr == "true"
 	apiPortStr, _ := database.GetSystemConfig("api_server_port")
-	
+
 	// 获取管理员模式配置
 	adminModeStr, _ := database.GetSystemConfig("admin_mode")
 	adminMode := adminModeStr != "false" // 默认为true
-	
+
 	// 设置JWT密钥
 	jwtSecret, _ := database.GetSystemConfig("jwt_secret")
 	if jwtSecret == "" {
@@ -145,7 +195,7 @@ func main() {
 		log.Printf("⚠️  使用默认JWT密钥，建议在生产环境中配置")
 	}
 	auth.SetJWTSecret(jwtSecret)
-	
+
 	// 在管理员模式下，确保admin用户存在
 	if adminMode {
 		err := database.EnsureAdminUser()
@@ -156,7 +206,7 @@ func main() {
 		}
 		auth.SetAdminMode(true)
 	}
-	
+
 	log.Printf("✓ 配置数据库初始化成功")
 	fmt.Println()
 
@@ -168,14 +218,15 @@ func main() {
 		// 尝试从JSON解析
 		if err := json.Unmarshal([]byte(defaultCoinsJSON), &defaultCoins); err != nil {
 			log.Printf("⚠️  解析default_coins配置失败: %v，使用硬编码默认值", err)
-			defaultCoins = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "HYPEUSDT"}
+			// 硬编码默认值：仅保留 BTC/ETH/SOL/BNB 这 4 个
+			defaultCoins = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
 		} else {
 			log.Printf("✓ 从数据库加载默认币种列表（共%d个）: %v", len(defaultCoins), defaultCoins)
 		}
 	} else {
-		// 如果数据库中没有配置，使用硬编码默认值
-		defaultCoins = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "HYPEUSDT"}
-		log.Printf("⚠️  数据库中未配置default_coins，使用硬编码默认值")
+		// 如果数据库中没有配置，使用硬编码默认值（仅 4 个币种）
+		defaultCoins = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+		log.Printf("⚠️  数据库中未配置default_coins，使用硬编码默认值（BTC/ETH/SOL/BNB）")
 	}
 
 	pool.SetDefaultCoins(defaultCoins)
@@ -186,21 +237,57 @@ func main() {
 		log.Printf("✓ 已启用默认主流币种列表")
 	}
 
+	// 初始化 ExecutionGate 配置
+	// 完整配置所有关键阈值，避免零值导致的问题
+	executionGateConfig := market.ExecutionGateConfig{
+		MaxSpreadBpsLimitOnly:             50.0,     // 0.5% - SpreadBps >= 此值时 limit_only
+		MaxSpreadBpsNoTrade:               120.0,    // 1.2% - SpreadBps >= 此值时 no_trade（BTC/ETH/SOL/BNB建议值）
+		MaxDepthRatioAbs:                  3.0,      // DepthRatio > 此值时 limit_only
+		MinDepthRatioAbs:                  0.33,     // DepthRatio < 此值时 limit_only
+		MaxSpreadBpsLimitPreferred:        15.0,     // 0.15% - SpreadBps >= 此值时 limit_preferred
+		MinBestNotionalUsdtLimitOnly:      10000.0,  // 10K USDT - best level备用阈值，极差市场强制限价
+		MinBestNotionalUsdtLimitPreferred: 50000.0,  // 50K USDT - best level备用阈值，一般差市场建议限价
+		MinDepthNotional10LimitOnly:       200000.0, // 200K USDT - 前10档累计，极差市场强制限价
+		MinDepthNotional10LimitPreferred:  500000.0, // 500K USDT - 前10档累计，一般差市场建议限价
+		NotionalMultiplierLimitOnly:       8.0,      // 计划notional > 8×effective_notional 时 limit_only
+		NotionalMultiplierNoTrade:         15.0,     // 计划notional > 15×effective_notional 时 no_trade
+		DefaultModeOnMissing:              "limit_only",
+	}
+
+	market.SetExecutionGateConfig(executionGateConfig)
+
+	// 打印最终配置用于调试
+	log.Printf("✓ ExecutionGate 执行门禁已初始化")
+	log.Printf("  📊 Spread阈值: limit_preferred=%.1fbps, limit_only=%.1fbps, no_trade=%.1fbps",
+		executionGateConfig.MaxSpreadBpsLimitPreferred,
+		executionGateConfig.MaxSpreadBpsLimitOnly,
+		executionGateConfig.MaxSpreadBpsNoTrade)
+	log.Printf("  💰 深度阈值: min_depth10_limit_only=%.0f, min_depth10_limit_preferred=%.0f",
+		executionGateConfig.MinDepthNotional10LimitOnly,
+		executionGateConfig.MinDepthNotional10LimitPreferred)
+
 	// 设置币种池API URL
 	coinPoolAPIURL, _ := database.GetSystemConfig("coin_pool_api_url")
 	if coinPoolAPIURL != "" {
 		pool.SetCoinPoolAPI(coinPoolAPIURL)
 		log.Printf("✓ 已配置AI500币种池API")
 	}
-	
+
 	oiTopAPIURL, _ := database.GetSystemConfig("oi_top_api_url")
 	if oiTopAPIURL != "" {
 		pool.SetOITopAPI(oiTopAPIURL)
 		log.Printf("✓ 已配置OI Top API")
 	}
 
+	// 创建全局配置（包含分层风控配置）
+	globalConfig := &config.Config{}
+	// 从数据库同步配置到globalConfig
+	if err := syncGlobalConfigFromDatabase(globalConfig, database); err != nil {
+		log.Printf("⚠️ 同步全局配置失败，使用默认配置: %v", err)
+	}
+
 	// 创建TraderManager
-	traderManager := manager.NewTraderManager()
+	traderManager := manager.NewTraderManager(globalConfig)
 
 	// 从数据库加载所有交易员到内存
 	err = traderManager.LoadTradersFromDatabase(database)
@@ -237,7 +324,7 @@ func main() {
 				status = "运行中"
 			}
 			fmt.Printf("  • %s (%s + %s) - 用户: %s - 初始资金: %.0f USDT [%s]\n",
-				trader.Name, strings.ToUpper(trader.AIModelID), strings.ToUpper(trader.ExchangeID), 
+				trader.Name, strings.ToUpper(trader.AIModelID), strings.ToUpper(trader.ExchangeID),
 				trader.UserID, trader.InitialBalance, status)
 		}
 	}
@@ -256,7 +343,7 @@ func main() {
 	fmt.Println()
 
 	// 获取API服务器端口
-    apiPort := 8080 // 默认端口
+	apiPort := 8080 // 默认端口
 	if apiPortStr != "" {
 		if port, err := strconv.Atoi(apiPortStr); err == nil {
 			apiPort = port

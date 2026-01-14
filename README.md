@@ -1090,6 +1090,19 @@ Each decision cycle (default 3 minutes), the system executes the following intel
 
 ---
 
+## 🗂️ Review Artifacts & Prompt Modules
+
+- `close_reviews/<trader_id>/<trade_id>.json` &mdash; canonical post-trade archives generated via `/api/trades/:trade_id/close-review`.  
+  Each file contains:
+  - `request_snapshot` / `trade_snapshot` for entry/exit context
+  - `major_decisions` / `position_lifecycle` describing the key AI actions
+  - `review` block with highlights, improvements, root cause, confidence, and action items
+- `decision_logs/<trader_id>/decision_*.json` &mdash; per-cycle records consumed by `/api/cycle-check`.
+- Prompt templates now live under `prompts/modules/` (for example `prompts/modules/MarketStateAndTrend.txt`).  
+  Update these module files to tweak the structured instructions that power the AI trader.
+
+---
+
 ## 🎛️ API Endpoints
 
 ### Configuration Management
@@ -1123,11 +1136,44 @@ GET /api/statistics?trader_id=xxx        # Statistics
 GET /api/performance?trader_id=xxx       # AI performance analysis
 ```
 
+### Review & Timeline APIs
+
+```bash
+GET  /api/cycle-check?trader_id=xxx        # Stream the latest decision cycles for debugging
+GET  /api/close-reviews?trader_id=xxx      # List stored close-review summaries
+GET  /api/trades/:trade_id/close-review    # Fetch a single close-review (summary + JSON file)
+POST /api/trades/:trade_id/close-review    # Upload/refresh the close-review JSON artifact
+```
+
 ### System Endpoints
 
 ```bash
 GET /api/health                   # Health check
 ```
+
+---
+
+## ✅ Close Review Testing Checklist
+
+**Manual flow**
+1. Let an AI trader complete at least one open → close cycle (or import a historical decision log).  
+   Inspect `decision_logs/<trader_id>/decision_*.json` to confirm the trade appears in the latest cycle.
+2. Call `GET /api/cycle-check?trader_id=<id>` and verify the response lists the most recent cycles that match the JSON file.
+3. Pick a `trade_id` from the **AI Learning → Trade History** widget (each trade card now exposes a deterministic ID).
+4. Submit a review payload:
+   ```bash
+   curl -X POST "http://localhost:8080/api/trades/<trade_id>/close-review?trader_id=<id>" \
+     -H "Authorization: Bearer <token>" \
+     -H "Content-Type: application/json" \
+     -d @examples/close_review_sample.json
+   ```
+5. Confirm that `close_reviews/<trader_id>/<trade_id>.json` is created and that `/api/close-reviews` returns the summary.
+6. Refresh the web dashboard → open **AI学习与反思** → click the trade card.  
+   The modal should show the request snapshot, the major-decision timeline, and the close-review summary. Status badges switch from *待复盘 ➜ 已复盘* as soon as the file loads.
+
+**Automation hints**
+- Add a CI step that runs `curl GET /api/cycle-check` followed by the POST above, asserting HTTP 201.
+- Lint the generated JSON by comparing it against the schema in `review/close_review.go`.
 
 ---
 

@@ -1,25 +1,28 @@
-import useSWR from 'swr';
+import { useMemo, useState } from 'react';
+import useSWR, { mutate } from 'swr';
 import { useLanguage } from '../contexts/LanguageContext';
 import { t } from '../i18n/translations';
 import { api } from '../lib/api';
-import { Brain, BarChart3, TrendingUp, TrendingDown, Sparkles, Coins, Trophy, ScrollText, Lightbulb } from 'lucide-react';
-
-interface TradeOutcome {
-  symbol: string;
-  side: string;
-  quantity: number;
-  leverage: number;
-  open_price: number;
-  close_price: number;
-  position_value: number;
-  margin_used: number;
-  pn_l: number;
-  pn_l_pct: number;
-  duration: string;
-  open_time: string;
-  close_time: string;
-  was_stop_loss: boolean;
-}
+import {
+  Brain,
+  BarChart3,
+  TrendingUp,
+  TrendingDown,
+  Sparkles,
+  Coins,
+  Trophy,
+  ScrollText,
+  Lightbulb,
+} from 'lucide-react';
+import type { CloseReviewSummary } from '../types';
+import {
+  TradeDetailModal,
+  type TradeOutcome,
+  formatDuration,
+  ensureTradeId,
+  withSyntheticId,
+  getReviewStatusMeta,
+} from './TradeReviewModal';
 
 interface SymbolPerformance {
   symbol: string;
@@ -48,9 +51,10 @@ interface PerformanceAnalysis {
 
 interface AILearningProps {
   traderId: string;
+  onTradeSelect?: (tradeId: string) => void;
 }
 
-export default function AILearning({ traderId }: AILearningProps) {
+export default function AILearning({ traderId, onTradeSelect }: AILearningProps) {
   const { language } = useLanguage();
   const { data: performance, error } = useSWR<PerformanceAnalysis>(
     traderId ? `performance-${traderId}` : 'performance',
@@ -59,6 +63,37 @@ export default function AILearning({ traderId }: AILearningProps) {
       refreshInterval: 30000, // 30秒刷新（AI学习分析数据更新频率较低）
       revalidateOnFocus: false,
       dedupingInterval: 20000,
+    }
+  );
+
+  const [selectedTrade, setSelectedTrade] = useState<TradeOutcome | null>(null);
+
+  const { data: closeReviews } = useSWR<CloseReviewSummary[]>(
+    traderId ? `close-reviews-${traderId}` : null,
+    () => api.getCloseReviews(traderId, 120),
+    {
+      refreshInterval: 60000,
+      revalidateOnFocus: false,
+    }
+  );
+
+  const reviewMap = useMemo(() => {
+    const map = new Map<string, CloseReviewSummary>();
+    closeReviews?.forEach((item) => map.set(item.trade_id, item));
+    return map;
+  }, [closeReviews]);
+
+  const {
+    data: reviewDetail,
+    error: reviewDetailError,
+    isLoading: reviewDetailLoading,
+  } = useSWR(
+    selectedTrade?.trade_id && !selectedTrade.trade_id.startsWith('synthetic-')
+      ? ['close-review', selectedTrade.trade_id, traderId]
+      : null,
+    ([, tradeId]) => api.getCloseReview(tradeId, traderId),
+    {
+      revalidateOnFocus: false,
     }
   );
 
@@ -98,6 +133,16 @@ export default function AILearning({ traderId }: AILearningProps) {
   const symbolStatsList = Object.values(symbolStats).filter(stat => stat != null).sort(
     (a, b) => (b.total_pn_l || 0) - (a.total_pn_l || 0)
   );
+  const bestSymbolTotalPnL = performance.best_symbol
+    ? Number(symbolStats[performance.best_symbol]?.total_pn_l ?? 0)
+    : 0;
+  const worstSymbolTotalPnL = performance.worst_symbol
+    ? Number(symbolStats[performance.worst_symbol]?.total_pn_l ?? 0)
+    : 0;
+  const activeSummary =
+    reviewDetail?.summary ??
+    (selectedTrade?.trade_id ? reviewMap.get(selectedTrade.trade_id) ?? null : null);
+  const activeDetail = reviewDetail?.detail ?? null;
 
   return (
     <div className="space-y-8">
@@ -390,8 +435,8 @@ export default function AILearning({ traderId }: AILearningProps) {
               </div>
               {symbolStats[performance.best_symbol] && (
                 <div className="text-lg font-semibold" style={{ color: '#6EE7B7' }}>
-                  {symbolStats[performance.best_symbol].total_pn_l > 0 ? '+' : ''}
-                  {symbolStats[performance.best_symbol].total_pn_l.toFixed(2)} USDT {t('pnl', language)}
+                  {bestSymbolTotalPnL > 0 ? '+' : ''}
+                  {bestSymbolTotalPnL.toFixed(2)} USDT {t('pnl', language)}
                 </div>
               )}
             </div>
@@ -412,8 +457,8 @@ export default function AILearning({ traderId }: AILearningProps) {
               </div>
               {symbolStats[performance.worst_symbol] && (
                 <div className="text-lg font-semibold" style={{ color: '#FCA5A5' }}>
-                  {symbolStats[performance.worst_symbol].total_pn_l > 0 ? '+' : ''}
-                  {symbolStats[performance.worst_symbol].total_pn_l.toFixed(2)} USDT {t('pnl', language)}
+                  {worstSymbolTotalPnL > 0 ? '+' : ''}
+                  {worstSymbolTotalPnL.toFixed(2)} USDT {t('pnl', language)}
                 </div>
               )}
             </div>
@@ -514,9 +559,40 @@ export default function AILearning({ traderId }: AILearningProps) {
               performance.recent_trades.map((trade: TradeOutcome, idx: number) => {
                 const isProfitable = trade.pn_l >= 0;
                 const isRecent = idx === 0;
+                const tradeId = ensureTradeId(trade);
+                const normalizedTrade = withSyntheticId(trade);
+                const hasReview = trade.trade_id ? reviewMap.has(trade.trade_id) : false;
+                const reviewStatus: 'done' | 'pending' | 'missing' = hasReview
+                  ? 'done'
+                  : trade.trade_id
+                    ? 'pending'
+                    : 'missing';
+                const statusMeta = getReviewStatusMeta(reviewStatus, language);
 
                 return (
-                  <div key={idx} className="rounded-xl p-4 backdrop-blur-sm transition-all hover:scale-[1.02]" style={{
+                  <div
+                    key={tradeId}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      if (onTradeSelect && trade.trade_id && !trade.trade_id.startsWith('synthetic-')) {
+                        onTradeSelect(trade.trade_id);
+                      } else {
+                        setSelectedTrade(normalizedTrade);
+                      }
+                    }}
+                    onKeyDown={(evt) => {
+                      if (evt.key === 'Enter' || evt.key === ' ') {
+                        evt.preventDefault();
+                        if (onTradeSelect && trade.trade_id && !trade.trade_id.startsWith('synthetic-')) {
+                          onTradeSelect(trade.trade_id);
+                        } else {
+                          setSelectedTrade(normalizedTrade);
+                        }
+                      }
+                    }}
+                    className="rounded-xl p-4 backdrop-blur-sm transition-all hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#F0B90B] focus:ring-offset-[#0B0E11]"
+                    style={{
                     background: isRecent
                       ? isProfitable
                         ? 'linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(14, 203, 129, 0.05) 100%)'
@@ -527,10 +603,12 @@ export default function AILearning({ traderId }: AILearningProps) {
                       : '1px solid rgba(71, 85, 105, 0.3)',
                     boxShadow: isRecent
                       ? '0 4px 16px rgba(139, 92, 246, 0.2)'
-                      : '0 2px 8px rgba(0, 0, 0, 0.1)'
-                  }}>
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
+                        : '0 2px 8px rgba(0, 0, 0, 0.1)',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <div className="flex items-center justify-between mb-3 gap-3">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-base font-bold mono" style={{ color: '#E0E7FF' }}>
                           {trade.symbol}
                         </span>
@@ -549,10 +627,18 @@ export default function AILearning({ traderId }: AILearningProps) {
                           </span>
                         )}
                       </div>
+                      <div className="flex items-center gap-3">
+                        <div className="text-xs font-semibold px-2 py-1 rounded-full" style={{
+                          background: statusMeta.background,
+                          color: statusMeta.color
+                        }}>
+                          {statusMeta.label}
+                      </div>
                       <div className="text-lg font-bold mono" style={{
                         color: isProfitable ? '#10B981' : '#F87171'
                       }}>
-                        {isProfitable ? '+' : ''}{trade.pn_l_pct.toFixed(2)}%
+                          {isProfitable ? '+' : ''}{(trade.pn_l_pct ?? 0).toFixed(2)}%
+                        </div>
                       </div>
                     </div>
 
@@ -560,13 +646,13 @@ export default function AILearning({ traderId }: AILearningProps) {
                       <div>
                         <div style={{ color: '#94A3B8' }}>{t('entry', language)}</div>
                         <div className="font-mono font-semibold" style={{ color: '#CBD5E1' }}>
-                          {trade.open_price.toFixed(4)}
+                          {(trade.open_price ?? 0).toFixed(4)}
                         </div>
                       </div>
                       <div className="text-right">
                         <div style={{ color: '#94A3B8' }}>{t('exit', language)}</div>
                         <div className="font-mono font-semibold" style={{ color: '#CBD5E1' }}>
-                          {trade.close_price.toFixed(4)}
+                          {(trade.close_price ?? 0).toFixed(4)}
                         </div>
                       </div>
                     </div>
@@ -607,7 +693,7 @@ export default function AILearning({ traderId }: AILearningProps) {
                         <span className="font-bold mono" style={{
                           color: isProfitable ? '#10B981' : '#F87171'
                         }}>
-                          {isProfitable ? '+' : ''}{trade.pn_l.toFixed(2)} USDT
+                          {isProfitable ? '+' : ''}{(trade.pn_l ?? 0).toFixed(2)} USDT
                         </span>
                       </div>
                     </div>
@@ -686,25 +772,25 @@ export default function AILearning({ traderId }: AILearningProps) {
           </div>
         </div>
       </div>
+
+      {selectedTrade && (
+        <TradeDetailModal
+          trade={selectedTrade}
+          summary={activeSummary ?? undefined}
+          detail={activeDetail}
+          loading={reviewDetailLoading}
+          error={reviewDetailError as Error | undefined}
+          onClose={() => setSelectedTrade(null)}
+          language={language}
+          traderId={traderId}
+          onReviewGenerated={async () => {
+            if (selectedTrade?.trade_id) {
+              await mutate(['close-review', selectedTrade.trade_id, traderId]);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
 
-// 格式化持仓时长
-function formatDuration(duration: string | undefined): string {
-  if (!duration) return '-';
-
-  const match = duration.match(/(\d+h)?(\d+m)?(\d+\.?\d*s)?/);
-  if (!match) return duration;
-
-  const hours = match[1] || '';
-  const minutes = match[2] || '';
-  const seconds = match[3] || '';
-
-  let result = '';
-  if (hours) result += hours.replace('h', '小时');
-  if (minutes) result += minutes.replace('m', '分');
-  if (!hours && seconds) result += seconds.replace(/(\d+)\.?\d*s/, '$1秒');
-
-  return result || duration;
-}

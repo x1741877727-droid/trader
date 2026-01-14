@@ -1,0 +1,195 @@
+════ 模块：TechnicalIndicators（指标证据字典）════
+
+【定位与职责】
+- 本模块是“指标证据字典”与解读器：为 AI 提供 market/data.go 中可用指标的字段路径、语义解释、典型场景、如何在 CoT（思维链）中表达（JSON.reasoning 保留单行摘要），以及与其他模块（Structure/Chan/Derivatives/RiskManagement）的组合建议。
+- 重要规则：不包含硬性数值或最终校验；所有数值阈值与执行约束由 `RiskManagement.txt` 定义并由后端校验。TechnicalIndicators 只负责证据与解释，决策由流程层执行。
+
+结构概览：
+1) 责任与边界（本节）
+2) 指标总览（按优先级：Primary/Secondary/Tertiary）
+3) 字段条目（字段路径 → 意义 → 场景 → 解读 → reasoning 示例 → 常见误判）
+4) 证据组合规则（最低证据、confidence 建议映射）
+5) 冲突处理（高阶优先、短期触发、例外填写 exception_reason）
+6) 输出/JSON 模板（与 DecisionChecklist/RiskManagement 对齐）
+7) 加密衍生品市场注意事项（funding/OI/liquidity/slippage）
+8) 快速场景速查（突破回踩/区间/急跌反弹）
+
+════════════════════════════════════════
+指标总览（按优先级）
+════════════════════════════════════════
+Primary（结构与背景，最重要）
+- `data.TrendPhase.TrendStrength4h` (趋势强度评分)
+- `data.DistanceToATH` (距离历史最高价百分比，判断趋势晚期风险)
+- `data.PriceAction5m/15m/1h/4h.LastSignal` (BOS/CHoCH)
+
+Secondary（动能/量能/波动）
+- `data.IntradaySeries.{EMA20Values,MACDValues,RSI7Values,RSI14Values,Volumes,BuySellRatios,OBVValues}` (5分钟日内数据)
+- `data.MidTermSeries15m.{MACDValues,RSI7Values,RSI14Values,Bollinger}`
+- `data.MidTermSeries1h.{MACDValues,RSI7Values,RSI14Values,ADX}`
+- `data.MidTermSeries4h.{MACDValues,RSI7Values,RSI14Values,Bollinger,ADX,EMA20,EMA50,ATR14,ATR3}` (4h周期指标)
+- `data.DistanceMetrics.*` (to_ema*, to_boll*, to_nearest_*)
+- `data.RiskMetrics.ATR14PercentOfPrice`
+
+Tertiary（衍生品/流动性/细节）
+- `data.Derivatives.*` (OpenInterestHist*, TopLongShortRatio*, GlobalLongShortAcct*, TakerBuySellVolume*, Basis*, FundingRateHistory*)
+- `data.DerivativesAlert.*` (OIChangePct*, TakerImbalanceFlag, FundingRateLevel)
+- `data.ICTPOI`, `data.ICTLiquidity`, `data.ICTPremiumDiscount`
+- `data.KeyLevels`, `data.Fib4h`, `data.Fib1h`, `data.CandleShapes15m`
+
+════════════════════════════════════════
+关键字段说明（覆盖所有指定字段）
+════════════════════════════════════════
+
+TrendPhase.TrendStrength4h (data.TrendPhase.TrendStrength4h)
+- 意义：4h 多周期背景阶段（早期/中期/晚期/震荡），决定策略激进度与首选行为。
+- 场景：用作背景偏好（若为 Late，倾向保守；若为 Early，倾向积极）。
+- 解读：作为背景而非绝对裁判；若与短周期冲突，AI 必须在 reasoning 说明理由。
+ - 解读：作为背景而非绝对裁判；若与短周期冲突，AI 必须在 CoT（思维链）中说明理由；JSON.reasoning 保留单行结论与关键数值摘要。
+- 示例： "TrendPhase.TrendStrength4h=70.0（证据：4h BOS + BB位置）"
+
+
+PriceActionSummary.LastSignal (data.PriceAction*.LastSignal)
+- 意义：结构性信号（BOS_up/CHoCH_up/none 等），为结构证据主来源。
+- 场景：判断趋势延续或特征变化，直接影响策略选择（A/B/C/D）。
+- 解读：同时报告发生时间与关联 OB/POI；若返回 "none"，AI 应解释缺信号原因。
+- 示例： "15m LastSignal=CHoCH_up @ts，支持：15m bullish OB"
+
+ChanTheory.* (data.ChanTheory)
+- 场景：当 ChanTheory.Confidence 高时，作为强结构证据；低置信度时作为辅助。
+- 解读：买卖点为辅助加分项，不应是单一硬触发；需与 PriceAction/KeyLevels 交叉验证。
+- 示例： "ChanTheory.TrendType1h=uptrend, CenterZone1h=lower → 有利右侧多单"
+
+DistanceMetrics.* (data.DistanceMetrics)
+- 意义：价格与均线/布林/关键位的距离百分比，判断拉伸或折价。
+- 场景：判断 Early/Mid/Late、选择 stop_anchor 与 TP 层级。
+- 解读：AI 应说明基准（例如 "基于4h swing"）并用语义描述（接近上轨/中部/下轨）。
+- 示例： "ToEMA20_1h = -1.2% → 接近1h EMA20 回踩位"
+
+RiskMetrics.ATR14PercentOfPrice (data.RiskMetrics.ATR14PercentOfPrice)
+- 意义：ATR14 相对于价格的百分比，供 stop_vs_atr 的尺度换算与 TP 估算。
+- 场景：用于把绝对距离转换为相对波动单位（ATR），利于跨品种一致性。
+- 解读：AI 输出 stop_vs_atr 并注明所用 ATR 值（后端进行数值校验）。
+- 示例： "atr14_pct=2.3% → 建议 stop_vs_atr 框架（后端校验）"
+
+DerivativesAlert.* (data.DerivativesAlert)
+- 意义：衍生品异常标记（OI 变化、taker 失衡、资金费率突变）。
+- 场景：当 OI 或 funding 异常时，作为“放大/降级”证据（影响仓位与滑点假设）。
+- 解读：AI 应说明对仓位/滑点/执行风险的影响并提出缓解（降低杠杆/限价单）。
+- 示例： "OI15m +12% & taker=strong_buy → 多单倾向，但警惕短期资金费率"
+
+ICTPOI / ICTLiquidity / ICTPremiumDiscount
+- 意义：订单块/缺口/流动性与溢折价信息，直接用于定位入场区间（OB/FVG）。
+- 场景：用于 entry_plan 中的 zone 指定（例如 1h OB mid）。
+- 解读：AI 在 entry_plan 中引用 POI 的 timeframe 和 mid/upper/lower。
+- 示例： "entry_zone: 1h OB mid=xxx~xxx (来源: ICTPOI)"
+
+KeyLevels / Fib4h / Fib1h
+- 意义：关键支撑/阻力与 Fibonacci 水平，作为 stop_anchor 与 TP 参考（结构化标识）。
+- 场景：stop_anchor 优先使用 KeyLevel.Basis（如 "4h_swing_low"）。
+- 解读：避免裸数止损；AI 应引用 level 名称并说明理由。
+- 示例： "stop_anchor=4h_swing_low (price=xxx)"
+
+CandleShapes15m
+ - 意义：短期 K 线几何（pinbar/engulfing 等），用于右侧确认或触发细节。
+ - 场景：与 CHoCH/BOS 结合用于短时间触发。
+ - 解读：把几何特征列为触发证据的一部分，不应单独作为硬触发。
+ - 示例： "15m latest candle=pinbar_bearish → 若与15m CHoCH_down共振，考虑撤退"
+
+
+- DistanceToATH (`data.DistanceToATH`)
+  - 意义：当前价格距离历史最高价（ATH）的百分比距离，正数表示当前价低于ATH，负数表示创新高。
+  - 使用场景：Late阶段风险评估，越接近ATH风险越高；辅助判断趋势成熟度。
+  - 示例输出： `"distance_to_ath": -5.2`（低于ATH 5.2%）或 `"distance_to_ath": 2.1`（高于ATH 2.1%）
+
+- TradeCount5m (`data.TradeCount5m`)
+  - 意义：最近短周期（5m）内交易笔数总和（近12根5m K线），衡量短期成交活跃度，辅助判断滑点风险。
+  - 使用场景：若 trade_count_5m 远高于历史均值 → 代表短期活跃，市价下单滑点风险上升。
+  - 示例输出： `"trade_count_5m": 120`
+
+- TradeCount15m (`data.TradeCount15m`)
+  - 意义：最近15m 内交易笔数总和（近12根15m K线），用于量能确认。
+  - 示例输出： `"trade_count_15m": 45`
+
+- LargeTakerVolume15m (`data.LargeTakerVolume15m`)
+  - 意义：来自衍生品/交易所 taker 数据的最大主动买/卖量（最近样本），用于检测短时冲击或强平潮。
+  - 使用场景：若该值突增 → 降低仓位或改用限价单。
+  - 示例输出： `"large_taker_volume_15m": 12345.67`
+
+- FundingChangeRate15mPct (`data.FundingChangeRate15mPct`)
+  - 意义：最近 funding rate 变化率（%），揭示资金成本短期倾向。
+  - 使用场景：funding 快速上升表示多头成本增高（多头可能减仓），对短期方向有放大/扭转意义。
+  - 示例输出： `"funding_change_rate_15m_pct": 0.12`
+
+- OIChangePct15m (`data.OIChangePct15m`)
+  - 意义：15m 开仓量（OI）变化百分比（与 DerivativesAlert 对齐）。
+  - 使用场景：与价格方向共振时放大信号强度；与价格相反时提示假突破或流动性风险。
+  - 示例输出： `"oi_change_pct_15m": 8.5`
+
+- VolumePercentile15m (`data.VolumePercentile15m`)
+  - 意义：当前 15m 成交量相对于最近窗口均值的百分比（current / avg *100），用于判断量能放大。
+  - 使用场景：配合 TradeCount 與 LargeTakerVolume 判断入场质量与滑点概率。
+  - 示例输出： `"volume_percentile_15m": 140.0`
+
+Intraday/MidTerm/LongerTerm 的 MACD / RSI / ADX
+- 意义：多周期动能/强度指标。LongerTerm/4h：背景；1h：中期确认；15m/5m：触发。
+- 场景：ADX 用于震荡/趋势判定（ADX<20 偏震荡，>25/30 趋势明确）。
+- 解读：AI 应分别列出各周期的值及其对决策的影响（背景 vs 触发）。
+- 示例： "4h ADX=28 (趋势强) + 15m MACD cross up → 支持顺势多单"
+
+**MACD金叉/死叉完整信号结构（加密货币优化参数）**
+- MACD数据结构：`data.{IntradaySeries|MidTermSeries15m|MidTermSeries1h|MidTermSeries4h}.MACDValues[]`
+  * `macd_line`: MACD线 (快EMA - 慢EMA，根据周期优化)
+  * `signal_line`: 信号线 (MACD线的EMA)
+  * `histogram`: 柱状图 (MACD线 - 信号线)
+  * `cross`: 交叉信号 ("golden_cross"/"dead_cross"/"bullish_trend"/"bearish_trend"/"none")
+  * `trend`: 整体趋势 ("bullish"/"bearish"/"neutral")
+  * `strength`: 交叉强度 (0-100，越大越强)
+
+
+════════════════════════════════════════
+证据组合规则与 confidence 建议
+════════════════════════════════════════
+- 最低证据要求：开仓建议需至少包含来自两个不同模块的证据（Structure + Momentum，或 Structure + Derivatives 等）。
+- Confidence 建议（参考值，不为后端硬阈）：
+  * 2 条跨模块证据 → confidence 40–60
+  * 3 条证据 → confidence 60–80
+  * ≥4 条证据 → confidence 80–100
+ - 若证据冲突（例如 4h 与 15m 明显相反），AI 必须在 CoT（思维链）中列出冲突并说明优先理由或返回 action=wait；JSON.reasoning 保留单行结论摘要。
+ - 若证据冲突（例如 4h 与 15m 明显相反），AI 必须在 CoT（思维链）中列出冲突并说明优先理由或返回 action=wait；JSON.reasoning 保留单行结论摘要。
+
+════════════════════════════════════════
+冲突处理与例外（输出要求）
+════════════════════════════════════════
+- 高阶周期（4h/1h）作为背景优先，但短周期（15m/5m）可触发小仓试探（sizing_hint="probe"），并在 JSON 标注 probe。
+- 任何反向/例外操作必须填写 `exception_reason` 与 `additional_risk_controls`（如更紧 stop_vs_atr、更小 position_size_usd）。
+- 若后端 RiskManagement 校验失败，流程层必须将 action 设为 wait。
+
+════════════════════════════════════════
+machine-readable 输出模板（与 DecisionChecklist 对齐，必填）
+════════════════════════════════════════
+{
+  "strategy_choice": "A|B|C|D|E",
+  "evidence": ["module.field:short_reason", ...],   // 至少2条，跨模块
+  "entry_plan": {"trigger":"semantic condition","limit_price":null|number},
+  "risk_plan": {"stop_anchor":"basis or description","stop_price":null|number,"stop_vs_atr":null|number},
+  "sizing_hint": "S|A|B -> high/med/low or probe",
+  "required_checks": ["R_R_ratio","position_size_usd<=MAX_MARGIN",...],
+  "exception_reason": null|"text",
+  "confidence": 0-100
+}
+
+════════════════════════════════════════
+加密衍生品市场注意（必须写明）
+════════════════════════════════════════
+- funding & OI：funding_rate_level 与 OI 突变会放大方向性风险；当出现 extreme 或 OI 急增时建议降低杠杆/仓位并在 CoT（思维链）中说明滑点/强平风险；JSON.reasoning 可保留单行摘要。
+- liquidity & slippage：在低流动性或接近大型订单块时使用限价、降低杠杆、扩大止损缓冲或取消计划。
+- 费用与 funding 成本：短期频繁进出需估算 funding/手续费对 TP 的侵蚀并在 CoT（思维链）中注明；JSON.reasoning 仅保留单行关键数值摘要。
+
+════════════════════════════════════════
+快速场景速查（模板化提示）
+════════════════════════════════════════
+- 突破后回踩：需要 4h BOS 或 1h CHoCH + 15m 确认，entry_plan 引用相应 POI/OB。
+- 区间边缘试探：需要 range_bounds + 15m 触发（吞没/针形/CHoCH）+ sizing_hint=probe（每币每轮限制次数）。
+- 急跌反弹：检查 DerivativesAlert（OI/funding）与 15m MACD/RSI，若短期技术指标与 4h 冲突，优先 wait 或 probe。
+
+

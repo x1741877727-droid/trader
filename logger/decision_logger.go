@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// ValidationError 验证错误详情
+type ValidationError struct {
+	Symbol   string `json:"symbol"`   // 币种
+	Action   string `json:"action"`   // 决策动作
+	Reason   string `json:"reason"`   // 错误原因
+}
+
 // DecisionRecord 决策记录
 type DecisionRecord struct {
 	Timestamp      time.Time          `json:"timestamp"`       // 决策时间
@@ -22,9 +29,19 @@ type DecisionRecord struct {
 	Positions      []PositionSnapshot `json:"positions"`       // 持仓快照
 	CandidateCoins []string           `json:"candidate_coins"` // 候选币种列表
 	Decisions      []DecisionAction   `json:"decisions"`       // 执行的决策
-	ExecutionLog   []string           `json:"execution_log"`   // 执行日志
-	Success        bool               `json:"success"`         // 是否成功
-	ErrorMessage   string             `json:"error_message"`   // 错误信息（如果有）
+	ExecutionLog     []string           `json:"execution_log"`     // 执行日志
+	Success          bool               `json:"success"`          // 是否成功
+	ErrorMessage     string             `json:"error_message"`    // 错误信息（如果有）
+	Status           string             `json:"status,omitempty"` // 决策状态: "ok"|"warning"|"error"
+	ErrorType        string             `json:"error_type,omitempty"` // 错误类型
+	ErrorSeverity    string             `json:"error_severity,omitempty"` // 错误严重程度: "warning"|"error"
+	ValidationErrors []ValidationError  `json:"validation_errors,omitempty"` // 验证错误详情
+
+	// PreLLM Gate相关字段
+	CooldownSkipLLM  bool     `json:"cooldown_skip_llm,omitempty"`  // 是否因冷却跳过LLM
+	CooldownSymbols  []string `json:"cooldown_symbols,omitempty"`  // 冷却中的symbols
+	ExtremeSymbols   []string `json:"extreme_symbols,omitempty"`   // 极端波动的symbols
+	CooldownBlockedActions []string `json:"cooldown_blocked_actions,omitempty"` // 被冷却拦截的开仓动作
 }
 
 // AccountSnapshot 账户状态快照
@@ -50,15 +67,30 @@ type PositionSnapshot struct {
 
 // DecisionAction 决策动作
 type DecisionAction struct {
-	Action    string    `json:"action"`    // open_long, open_short, close_long, close_short
-	Symbol    string    `json:"symbol"`    // 币种
-	Quantity  float64   `json:"quantity"`  // 数量
-	Leverage  int       `json:"leverage"`  // 杠杆（开仓时）
-	Price     float64   `json:"price"`     // 执行价格
-	OrderID   int64     `json:"order_id"`  // 订单ID
-	Timestamp time.Time `json:"timestamp"` // 执行时间
-	Success   bool      `json:"success"`   // 是否成功
-	Error     string    `json:"error"`     // 错误信息
+	Action          string      `json:"action"`                     // open_long, open_short, close_long, close_short
+	Symbol          string      `json:"symbol"`                     // 币种
+	Quantity        float64     `json:"quantity"`                   // 数量
+	Leverage        int         `json:"leverage"`                   // 杠杆（开仓时）
+	Price           float64     `json:"price"`                      // 执行价格
+	OrderID         int64       `json:"order_id"`                   // 订单ID
+	Timestamp       time.Time   `json:"timestamp"`                  // 执行时间
+	Success         bool        `json:"success"`                    // 是否成功
+	Error           string      `json:"error"`                      // 错误信息
+	WasStopLoss     bool        `json:"was_stop_loss,omitempty"`    // 是否由止损触发
+	Status          string      `json:"status,omitempty"`           // 执行状态 (EXECUTED, ABORTED, etc.)
+	Reason          string      `json:"reason,omitempty"`           // 失败原因
+	ExecutionReport interface{} `json:"execution_report,omitempty"` // M2.2 执行报告
+
+	// ExecutionGate 相关字段
+	GateMode            string `json:"gate_mode,omitempty"`            // limit_only/limit_preferred/market_ok
+	GateReason          string `json:"gate_reason,omitempty"`          // gate 原因
+	ExecutionPreference string `json:"execution_preference,omitempty"` // AI 给的偏好: market/limit/auto
+	FinalExecution      string `json:"final_execution,omitempty"`      // 系统最终执行: market/limit
+
+	// 止损相关字段
+	StopLossSource string `json:"stop_loss_source,omitempty"` // 止损来源: structure/formula
+	Override            bool   `json:"override,omitempty"`             // 是否被 gate 强制改写
+	OverrideReason      string `json:"override_reason,omitempty"`      // 强制改写原因
 }
 
 // DecisionLogger 决策日志记录器
@@ -122,7 +154,9 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 	// 先按修改时间倒序收集（最新的在前）
 	var records []*DecisionRecord
 	count := 0
-	for i := len(files) - 1; i >= 0 && count < n; i-- {
+	// 如果 n <= 0，返回全部记录
+	limitAll := n <= 0
+	for i := len(files) - 1; i >= 0 && (limitAll || count < n); i-- {
 		file := files[i]
 		if file.IsDir() {
 			continue
@@ -270,6 +304,7 @@ type Statistics struct {
 
 // TradeOutcome 单笔交易结果
 type TradeOutcome struct {
+	TradeID       string    `json:"trade_id"`
 	Symbol        string    `json:"symbol"`         // 币种
 	Side          string    `json:"side"`           // long/short
 	Quantity      float64   `json:"quantity"`       // 仓位数量
@@ -337,37 +372,40 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 	// 为了避免开仓记录在窗口外导致匹配失败，需要先从所有历史记录中找出未平仓的持仓
 	// 获取更多历史记录来构建完整的持仓状态（使用更大的窗口）
-	allRecords, err := l.GetLatestRecords(lookbackCycles * 3) // 扩大3倍窗口
-	if err == nil && len(allRecords) > len(records) {
-		// 先从扩大的窗口中收集所有开仓记录
-		for _, record := range allRecords {
-			for _, action := range record.Decisions {
-				if !action.Success {
-					continue
-				}
-
-				symbol := action.Symbol
-				side := ""
-				if action.Action == "open_long" || action.Action == "close_long" {
-					side = "long"
-				} else if action.Action == "open_short" || action.Action == "close_short" {
-					side = "short"
-				}
-				posKey := symbol + "_" + side
-
-				switch action.Action {
-				case "open_long", "open_short":
-					// 记录开仓
-					openPositions[posKey] = map[string]interface{}{
-						"side":      side,
-						"openPrice": action.Price,
-						"openTime":  action.Timestamp,
-						"quantity":  action.Quantity,
-						"leverage":  action.Leverage,
+	// 如果 lookbackCycles = 0（获取全部记录），则不需要再获取 allRecords
+	if lookbackCycles > 0 {
+		allRecords, err := l.GetLatestRecords(lookbackCycles * 3) // 扩大3倍窗口
+		if err == nil && len(allRecords) > len(records) {
+			// 先从扩大的窗口中收集所有开仓记录
+			for _, record := range allRecords {
+				for _, action := range record.Decisions {
+					if !action.Success {
+						continue
 					}
-				case "close_long", "close_short":
-					// 移除已平仓记录
-					delete(openPositions, posKey)
+
+					symbol := action.Symbol
+					side := ""
+					if action.Action == "open_long" || action.Action == "close_long" {
+						side = "long"
+					} else if action.Action == "open_short" || action.Action == "close_short" {
+						side = "short"
+					}
+					posKey := symbol + "_" + side
+
+					switch action.Action {
+					case "open_long", "open_short":
+						// 记录开仓（使用更精确的key，包含时间戳避免冲突）
+						openPositions[posKey] = map[string]interface{}{
+							"side":      side,
+							"openPrice": action.Price,
+							"openTime":  action.Timestamp,
+							"quantity":  action.Quantity,
+							"leverage":  action.Leverage,
+						}
+					case "close_long", "close_short":
+						// 移除已平仓记录
+						delete(openPositions, posKey)
+					}
 				}
 			}
 		}
@@ -391,7 +429,8 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 			switch action.Action {
 			case "open_long", "open_short":
-				// 更新开仓记录（可能已经在预填充时记录过了）
+				// 更新开仓记录（覆盖之前的记录，确保使用最新的开仓）
+				// 这样可以避免把旧的开仓时间和新的平仓时间错误配对
 				openPositions[posKey] = map[string]interface{}{
 					"side":      side,
 					"openPrice": action.Price,
@@ -427,8 +466,12 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						pnlPct = (pnl / marginUsed) * 100
 					}
 
+					// 计算持仓时长
+					duration := action.Timestamp.Sub(openTime)
+
 					// 记录交易结果
 					outcome := TradeOutcome{
+						TradeID:       fmt.Sprintf("%s_%d_%d", symbol, openTime.Unix(), action.Timestamp.Unix()),
 						Symbol:        symbol,
 						Side:          side,
 						Quantity:      quantity,
@@ -439,9 +482,16 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						MarginUsed:    marginUsed,
 						PnL:           pnl,
 						PnLPct:        pnlPct,
-						Duration:      action.Timestamp.Sub(openTime).String(),
+						Duration:      duration.String(),
 						OpenTime:      openTime,
 						CloseTime:     action.Timestamp,
+						WasStopLoss:   action.WasStopLoss,
+					}
+
+					// 调试日志：检测异常长的持仓时间
+					if duration.Hours() > 24 {
+						fmt.Printf("⚠️ 检测到异常长的持仓时间: %s %s, 持仓时长: %v (开仓: %v, 平仓: %v)\n",
+							symbol, side, duration, openTime, action.Timestamp)
 					}
 
 					analysis.RecentTrades = append(analysis.RecentTrades, outcome)
@@ -524,12 +574,13 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 	}
 
 	// 只保留最近的交易（倒序：最新的在前）
-	if len(analysis.RecentTrades) > 10 {
+	const maxRecentTrades = 100 // 增加到100笔，前端会按需滚动加载
+	if len(analysis.RecentTrades) > maxRecentTrades {
 		// 反转数组，让最新的在前
 		for i, j := 0, len(analysis.RecentTrades)-1; i < j; i, j = i+1, j-1 {
 			analysis.RecentTrades[i], analysis.RecentTrades[j] = analysis.RecentTrades[j], analysis.RecentTrades[i]
 		}
-		analysis.RecentTrades = analysis.RecentTrades[:10]
+		analysis.RecentTrades = analysis.RecentTrades[:maxRecentTrades]
 	} else if len(analysis.RecentTrades) > 0 {
 		// 反转数组
 		for i, j := 0, len(analysis.RecentTrades)-1; i < j; i, j = i+1, j-1 {

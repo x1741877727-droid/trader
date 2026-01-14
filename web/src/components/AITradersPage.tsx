@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import useSWR from 'swr';
 import { api } from '../lib/api';
-import type { TraderInfo, CreateTraderRequest, AIModel, Exchange } from '../types';
+import type { TraderInfo, CreateTraderRequest, AIModel, Exchange, DecisionRecord } from '../types';
 import { useLanguage } from '../contexts/LanguageContext';
 import { t, type Language } from '../i18n/translations';
 import { getExchangeIcon } from './ExchangeIcons';
@@ -27,6 +27,61 @@ function getModelDisplayName(modelId: string): string {
 function getShortName(fullName: string): string {
   const parts = fullName.split('_');
   return parts.length > 1 ? parts[parts.length - 1] : fullName;
+}
+
+// 决策状态显示组件
+function DecisionStatusBanner({ traderId, language }: { traderId: string; language: Language }) {
+  const { data: decisions } = useSWR<DecisionRecord[]>(
+    `decisions-${traderId}`,
+    () => api.getLatestDecisions(traderId),
+    { refreshInterval: 30000 }
+  );
+
+  if (!decisions || decisions.length === 0) {
+    return null;
+  }
+
+  const latestDecision = decisions[0];
+  const status = latestDecision.status || (latestDecision.success ? 'ok' : 'error');
+
+  if (status === 'ok') {
+    return null; // 正常状态不显示
+  }
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'warning':
+        return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'error':
+        return 'bg-red-100 text-red-800 border-red-200';
+      default:
+        return 'bg-gray-100 text-gray-800 border-gray-200';
+    }
+  };
+
+  const getStatusText = (status: string, errorType?: string) => {
+    if (status === 'warning' && errorType === 'DECISION_VALIDATION_REJECTED') {
+      return t('decisionRejected', language);
+    }
+    return latestDecision.error_message || t('decisionError', language);
+  };
+
+  return (
+    <div className={`px-3 py-2 rounded text-xs border ${getStatusColor(status)} mt-2`}>
+      <div className="font-medium">
+        {getStatusText(status, latestDecision.error_type)}
+      </div>
+      {latestDecision.validation_errors && latestDecision.validation_errors.length > 0 && (
+        <div className="mt-1 text-xs">
+          {latestDecision.validation_errors.map((error, idx) => (
+            <div key={idx}>
+              {error.symbol}: {error.reason}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface AITradersPageProps {
@@ -280,7 +335,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       const request = {
         models: Object.fromEntries(
           updatedModels.map(model => [
-            model.provider, // 使用 provider 而不是 id
+            model.id, // 使用 id 而不是 provider
             {
               enabled: model.enabled,
               api_key: model.apiKey || '',
@@ -308,7 +363,18 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
   const handleSaveModelConfig = async (modelId: string, apiKey: string, customApiUrl?: string, customModelName?: string) => {
     try {
       // 找到要配置的模型（从supportedModels中）
-      const modelToUpdate = supportedModels?.find(m => m.id === modelId);
+      // 支持两种情况：
+      // 1) modelId 是 supportedModels 中的 id（例如 'deepseek'）——创建新用户配置
+      // 2) modelId 是已配置的用户模型 id（例如 'admin_deepseek'）——编辑已有配置
+      let modelToUpdate = supportedModels?.find(m => m.id === modelId) || allModels?.find(m => m.id === modelId);
+      if (!modelToUpdate) {
+        // 作为兼容，尝试通过 provider 字段匹配（用户可能传入 provider）
+        const byProvider = supportedModels?.find(m => m.provider === modelId) || allModels?.find(m => m.provider === modelId);
+        if (byProvider) {
+          // 使用 provider 对应的基础模型信息
+          modelToUpdate = byProvider;
+        }
+    } 
       if (!modelToUpdate) {
         alert(t('modelNotExist', language));
         return;
@@ -332,7 +398,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       const request = {
         models: Object.fromEntries(
           updatedModels.map(model => [
-            model.provider, // 使用 provider 而不是 id
+            model.id, // 使用 id 而不是 provider
             {
               enabled: model.enabled,
               api_key: model.apiKey || '',
@@ -676,10 +742,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         </div>
 
         {traders && traders.length > 0 ? (
-          <div className="space-y-4">
+          <div className="space-y-6">
             {traders.map(trader => (
-              <div key={trader.trader_id}
-                   className="flex items-center justify-between p-4 rounded transition-all hover:translate-y-[-1px]"
+              <div key={trader.trader_id}>
+                {/* 交易员信息卡片 */}
+                <div className="flex items-center justify-between p-4 rounded transition-all hover:translate-y-[-1px]"
                    style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
                 <div className="flex items-center gap-4">
                   <div className="w-12 h-12 rounded-full flex items-center justify-center"
@@ -757,7 +824,11 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
+                  </div>
                 </div>
+
+                {/* 决策状态显示 */}
+                <DecisionStatusBanner traderId={trader.trader_id} language={language} />
               </div>
             ))}
           </div>
@@ -876,8 +947,16 @@ function SignalSourceModal({
     onSave(coinPool.trim(), oiTop.trim());
   };
 
+  // 防止背景滚动
+  React.useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div className="fixed inset-0 flex items-center justify-center z-[60] p-4" style={{ backgroundColor: 'rgba(11, 14, 17, 0.95)' }}>
       <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg relative" style={{ background: '#1E2329' }}>
         <h3 className="text-xl font-bold mb-4" style={{ color: '#EAECEF' }}>
           📡 {t('signalSourceConfig', language)}
@@ -999,8 +1078,16 @@ function ModelConfigModal({
   // 可选择的模型列表（所有支持的模型）
   const availableModels = allModels || [];
 
+  // 防止背景滚动
+  React.useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div className="fixed inset-0 flex items-center justify-center z-[60] p-4" style={{ backgroundColor: 'rgba(11, 14, 17, 0.95)' }}>
       <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg relative" style={{ background: '#1E2329' }}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-xl font-bold" style={{ color: '#EAECEF' }}>
@@ -1238,8 +1325,16 @@ function ExchangeConfigModal({
   // 可选择的交易所列表（所有支持的交易所，用于下拉选择）
   const availableExchanges = supportedExchanges || [];
 
+  // 防止背景滚动
+  React.useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div className="fixed inset-0 flex items-center justify-center z-[60] p-4" style={{ backgroundColor: 'rgba(11, 14, 17, 0.95)' }}>
       <div className="bg-gray-800 rounded-lg p-6 w-full max-w-lg relative" style={{ background: '#1E2329' }}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-xl font-bold" style={{ color: '#EAECEF' }}>

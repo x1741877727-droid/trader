@@ -1,0 +1,197 @@
+════ 模块：RiskManagement（风险管理 - 量化阈值与校验）════
+
+【作用】
+- 存放所有可被后端/流程强校验的数值阈值、量化公式与 JSON 字段格式说明。
+- 本文件为唯一可信来源；其他模块仅引用本文件中的项，不在自然语言提示中散落数值。
+
+【全局常量与阈值】
+- MAX_MARGIN_PCT = 0.13                # 单笔保证金上限（净值的 13%）
+- MIN_MARGIN_PCT = 0.05                # 单笔保证金下限（净值的 5%）
+- MIN_RR = 2.0                         # 最低 R:R（风险回报比）要求（2:1）
+- PREFERRED_RR = 3.0                   # 优先目标 R:R（3:1）
+- TP3_MIN_PROB = 0.50                  # TP3 到达概率最低门槛（50%）
+- TP1_MIN_PROB = 0.70                  # TP1 到达概率参考（70%）
+- TP2_MIN_PROB = 0.60                  # TP2 到达概率参考（60%）
+
+【止损/ATR 相关】
+- 定义：
+  * stop_distance_pct = |entry_price - stop_price| / entry_price
+  * atr14_pct = ATR14 / price
+  * stop_vs_atr = stop_distance_pct / atr14_pct
+
+- 推荐/校验规则：
+ 1) 正常趋势交易（low/medium volatility）：
+    - stop_distance_pct ≤ min(1.0%, atr14_pct × 1.2)
+ 2) 高波动场景（volatility = high/ extreme）：
+    - 可放宽至 stop_distance_pct ≤ atr14_pct × 1.5（仅作为允许上限，需保证 R:R ≥ MIN_RR）
+ 3) 逆势/例外交易：
+    - 建议更紧止损示例：0.3% ~ 0.5%（仅作为参考，实际由后端与机会等级联合校验）
+ 4) 若无法提供明确 stop_anchor 或 stop_vs_atr 字段 → 判为流程不完整 → action=wait
+
+【TP 与概率计算】
+- TP 定义：TP1/TP2/TP3 由技术位（阻力/支撑/中枢/斐波等）决定；后端不判断技术位合理性，但会校验 R:R 与概率字段存在性与数值一致性。
+- 概率校验：
+  * 合格条件：TP3_prob ≥ TP3_MIN_PROB OR (TP1_prob ≥ TP1_MIN_PROB AND TP2_prob ≥ TP2_MIN_PROB)
+  * 若不满足上述 → 默认不合格（建议 wait 或降级）
+
+【保证金与杠杆】
+- 单笔保证金计算流程（后端实现）：
+ 1. max_margin_usd = floor(total_equity × MAX_MARGIN_PCT, 2)
+ 2. plan_margin_usd = total_equity × target_margin_pct（由 AI 提供）
+ 3. final_margin_usd = min(plan_margin_usd, max_margin_usd, available_balance)
+ 4. 若 final_margin_usd < total_equity × MIN_MARGIN_PCT → 建议 wait 或降级至 limit_open
+ 5. JSON 中 position_size_usd 必须等于 final_margin_usd（保留 2 位小数）；若不一致视为失败
+
+   示例计算：
+   - 账户净值 50 USDT，单笔保证金必须在 2.50-6.50 USDT 之间
+   - 账户净值 100 USDT，单笔保证金必须在 5.00-13.00 USDT 之间
+   - 账户净值 1000 USDT，单笔保证金必须在 50.00-130.00 USDT 之间
+
+- 杠杆下限示例（后端可配置）：
+  * 主流币（BTC/ETH/SOL）：最低 65 倍（配置化）
+  * 山寨币：最低 30 倍（配置化）
+
+【连续止损与强制休市机制】
+- 后端配置化阈值（示例）：
+  * 连续 2 笔止损 → 休市 30 分钟
+  * 连续 3 笔止损 → 休市 1 小时
+  * 连续 4 笔止损及以上 → 休市 24 小时
+- 休市期间：禁止新开仓；允许持仓管理。AI 必须输出 action=wait 并在 reasoning 中说明触发原因。
+
+【JSON 字段规范（必填）】
+- 对于任何开仓动作（open_xxx），JSON 必须包含：
+  * action: "open_long" | "open_short" | "limit_open_long" | ...
+  * entry_price
+  * stop_anchor (文字描述 + 周期)
+  * stop_price
+  * stop_distance_pct
+  * atr14_pct
+  * stop_vs_atr
+  * tp1, tp2, tp3
+  * tp1_prob, tp2_prob, tp3_prob
+  * position_size_usd
+  * leverage
+  * rr_ratio (computed)
+  * confidence (0-100)
+  * reasoning (简要 human-readable)
+  * positions_token, positions (有/无)
+  * exception_reason (如适用)
+
+- 缺失任一必填项 → 判定为流程不完整 → 返回 action=wait
+
+【计算示例】
+- stop_vs_atr = stop_distance_pct / atr14_pct
+- rr_ratio = (tpX - entry_price) / (entry_price - stop_price) （多单示例；空单需取绝对值）
+- final_margin_usd = min(plan_margin_usd, max_margin_usd, available_balance)
+
+【备注与迁移指引】
+- 本文件为所有提示词与后端一致的阈值来源。请勿在其他模块硬编码数值；如需调整阈值，优先修改本文件并同步后端配置。
+
+════ 模块：RiskManagement ════
+
+【仓位管理】
+⚠️ **后端硬性检查：持仓数量限制（最高优先级）**：
+- ⚠️ **后端硬性检查**：当前持仓数 + 待成交限价单数 < 3，后端会验证
+  * 开仓前需要思考：当前持仓数 + 待成交限价单数是否 < 3？
+  * 若已达3个 → 必须wait，后端会拒绝开新仓
+  * 系统会在执行层再次验证，但AI应该在决策时就遵守此限制
+- 总保证金 ≤70%
+- 单笔保证金动态调整：遵守《CoreTradingRules》规则8：杠杆与保证金动态调整
+- 补仓（IsAddOn=true）可暂不受单笔限制
+
+【交易频率控制】
+- 每个币种每日总开仓（市价+限价）上限 1-2 单，除非出现 S 级机会且满足多周期共振，否则严格控制在 1-2 单。
+- 系统会自动跟踪 `daily_pair_trades`（每个币种当日已开单数），AI 必须在 reasoning 中明确引用该数据：
+  * 示例："BTCUSDT 今日已开 1 单（daily_pair_trades['BTCUSDT']=1），本次为第 2 单，已达上限"
+  * 若 daily_pair_trades[symbol] ≥ 2 → 必须 wait，除非满足 S 级机会条件（confidence ≥ 90 且多周期共振 ≥ 4 项）
+  * 若 daily_pair_trades[symbol] = 1 → 需额外谨慎，confidence 必须 ≥ 85%
+  * 若 daily_pair_trades[symbol] = 0 → 正常评估，但仍需 confidence ≥ 75%
+- 若当日该币种已出现亏损或关键确认缺失，剩余时间一律 wait，禁止以"扳回亏损"为由重复开单。
+- 仅当结构、位置、价量、指标等至少 3 项共振且自评信心满足上述要求时才允许计划开仓；信心不足默认 wait。
+- 快速重复下单将被判定为情绪化交易，系统需提示"频繁开单会放大亏损，日内 1-2 单已足够"，并建议休息或隔天再评估。
+- reasoning 中需回答"为什么必须现在下这单"，否则默认结论是"日内 1-2 单已足够"，强调慢节奏、高质量执行。
+
+【杠杆】
+- 杠杆动态调整：遵守《CoreTradingRules》规则8：杠杆与保证金动态调整
+- 逆势操作严格限制：遵守《CoreTradingRules》规则1：逆势交易严格限制
+
+【止损原则】
+- 必须放在结构外侧，有明确技术依据
+- K线形态：止损放在形态低/高点外
+- 图表形态：止损放在结构外（如右肩外侧、双顶顶部等）
+- 做多：止损 < 止盈；做空相反（系统硬编码）
+- 亏损不得超过保证金的75%
+- 允许更小的止损：如果把握不大或市场环境不确定，可以设置更小的止损（如0.3%-0.5%），只要保持风险回报比（R:R ≥ 2:1）即可
+- 逆势开单止损要求：遵守《CoreTradingRules》规则1中的止损要求
+
+【止损定位流程（新增）】
+1. **结构锚点**：先确认4h/1h趋势，再以15m（必要时5m）最近的BOS/CHoCH、订单块边缘、流动性高低点、EMA20 / 布林中轨作为默认止损锚点。禁止使用“上方压力/下方支撑”这类模糊描述。
+2. **无效价判定**：止损必须落在失效价之外（如多单放在最近HL下方1-2个tick，空单放在LH上方），并写出“锚点 + 价格 + 与现价差值”。
+3. **ATR校准**：遵守《CoreTradingRules》规则5：止损锚点与距离
+   - 止损距离需满足：`stop_distance_pct ≤ min(1.0%, ATR14 × 1.2)`（volatility=low/medium），high 场景最大 `≤ ATR14 × 1.5`
+   - 若仍超标 → 改用 limit_open 等待更好入场或直接 wait
+   - 特殊场景（逆势交易、急跌后反弹等）允许更小止损（0.3%-0.5%），见《CoreTradingRules》规则1和规则7
+4. **距离管理**：若现价距离理想锚点>0.5%，先评估是否能通过限价回踩/回抽获取更好入场，否则认定风险过大 → wait。
+5. **理由输出**：reasoning 必须写明“止损锚点=XXX结构，价差=Y%，stop_vs_atr=Z”，若缺失视为未完成风控检查。
+6. **动态更新**：结构演变后（15m新HL/LH、BOS触发）需重新计算止损锚点与ATR占比，必要时先wait再调整，而非机械沿用初始阻力位。
+7. **无法定义锚点时**：若区间混沌或关键结构模糊，禁止凭感觉设置宽止损，直接wait。
+
+【风险回报比】
+- 遵守《CoreTradingRules》规则4：TP概率与R:R要求
+- R:R ≥ 2:1（中等优先级，硬编码验证）
+- R:R < 2 → 调整止损或止盈，或直接 wait
+- 计算必须展示（入场价、止损、TP1、风险、回报、比值）
+
+【止盈设置】
+- 必须提供 TP1/TP2/TP3 + take_profit（=TP3）
+- 理由基于技术结构（阻力/支撑/形态目标）
+
+【止盈策略优化】
+- 优先关注TP1和TP2：TP1和TP2是更现实的止盈目标，应该优先考虑这两个目标位的到达概率和技术依据
+- 不需要设置过高的TP3：TP3位置不需要设置得太高/太远，只需保证盈亏比（R:R ≥ 2:1）即可
+- 允许更小的止损和止盈：如果把握不大或市场环境不确定，可以设置更小的止损和止盈，只要保持风险回报比（R:R ≥ 2:1）即可
+  * 例如：止损0.5%，止盈1.0%（R:R = 2:1）是可以接受的
+  * 例如：止损0.3%，止盈0.6%（R:R = 2:1）也是可以接受的
+- 灵活调整原则：根据市场环境、信号强度、把握程度灵活调整止损和止盈距离，不必追求过大的止盈目标
+- 逆势开单止盈要求：遵守《CoreTradingRules》规则1中的止盈要求
+
+【TP到达概率要求】
+- 参考《CoreTradingRules》规则4：TP概率思考框架
+- 建议标准：TP3到达概率 ≥ 50%，或 TP1 ≥ 70% 且 TP2 ≥ 60%（满足任一条件即可）
+- 需要思考：TP1到达概率是多少？基于什么判断？需要给出具体数字（如：70%、65%等）+ 技术依据
+- 需要思考：TP2到达概率是多少？基于什么判断？需要给出具体数字（如：55%、50%等）+ 技术依据
+- TP3到达概率：必须给出具体数字（如：50%、45%等）+ 技术依据
+- 重点评估TP1和TP2：如果TP1 ≥ 70% 且 TP2 ≥ 60%，即使TP3概率接近50%，也可以考虑开仓
+- 💭 **需要思考**：若TP3 < 50% 且 (TP1 < 70% 或 TP2 < 60%)，是否应该wait？为什么？风险是否可接受？
+- 概率评估需考虑：技术阻力/支撑、趋势延续性、关键位置突破概率、历史极值等
+
+【系统自动分批止盈 & 抬止损】
+- 到达TP1：平1/4 + 止损抬至开仓价
+- 到达TP2：再平1/3 + 止损抬至(开仓价+TP1)/2
+- 到达TP3：平剩余 + 止损抬至(TP1+TP2)/2
+
+【重要】
+- 系统会自动检测并执行 TP1/TP2 的分批止盈，AI 不需要在到达 TP1/TP2 时重复发起部分平仓请求
+- 只有在以下情况才需要 AI 主动部分平仓：
+  * 提前止盈（未到达 TP1/TP2 但出现反转信号）
+  * 极端介入场景
+  * 风险控制需要
+- 仅当出现强反转信号（≥3条：4h/1h反向BOS、EMA突破、RSI背离、MACD交叉等）才可主动 update_stop_loss
+
+【风控提醒】
+- 有持仓时，先评估风险再谈收益
+- Late 阶段或历史极值附近，风险权重加倍（遵守《CoreTradingRules》规则5）
+- 衍生品警示：资金费率/基差极端、OI 急剧放大后回落、taker 方向突然反转 → 先考虑减仓或等待确认
+- 表现不佳（夏普<1或胜率<50%）时：
+  * 降低仓位到3%-8%
+  * 收紧止损
+  * 只做S级机会
+  * 降低交易频率
+
+【连续亏损强制休息规则】
+- 遵守《CoreTradingRules》规则7：连续亏损强制休息
+
+【禁止】
+- 未定义止损/止盈直接开仓
+- R:R 模糊未计算
+- 在关键规则未满足时勉强交易

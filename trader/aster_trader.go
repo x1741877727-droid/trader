@@ -728,9 +728,31 @@ func (t *AsterTrader) CloseLong(symbol string, quantity float64) (map[string]int
 
 	log.Printf("✓ 平多仓成功: %s 数量: %s", symbol, qtyStr)
 
-	// 平仓后取消该币种的所有挂单(止损止盈单)
-	if err := t.CancelAllOrders(symbol); err != nil {
-		log.Printf("  ⚠ 取消挂单失败: %v", err)
+	// 检查是否还有剩余持仓，只有全平时才取消挂单
+	positions, err := t.GetPositions()
+	if err == nil {
+		hasRemainingPosition := false
+		for _, pos := range positions {
+			if pos["symbol"] == symbol && pos["side"] == "long" {
+				remainingQty, _ := pos["positionAmt"].(float64)
+				if remainingQty > 0 {
+					hasRemainingPosition = true
+					log.Printf("  ℹ %s 还有剩余多仓 %.4f，保留止损止盈委托", symbol, remainingQty)
+					break
+				}
+			}
+		}
+		// 只有全平时才取消挂单
+		if !hasRemainingPosition {
+			if err := t.CancelAllOrders(symbol); err != nil {
+				log.Printf("  ⚠ 取消挂单失败: %v", err)
+			} else {
+				log.Printf("  ✓ 全平完成，已取消所有挂单")
+			}
+		}
+	} else {
+		// 如果获取持仓失败，为了安全起见，不取消挂单（避免误取消部分平仓后的止损止盈）
+		log.Printf("  ⚠ 无法获取持仓状态，保留挂单以防误取消")
 	}
 
 	return result, nil
@@ -811,9 +833,31 @@ func (t *AsterTrader) CloseShort(symbol string, quantity float64) (map[string]in
 
 	log.Printf("✓ 平空仓成功: %s 数量: %s", symbol, qtyStr)
 
-	// 平仓后取消该币种的所有挂单(止损止盈单)
-	if err := t.CancelAllOrders(symbol); err != nil {
-		log.Printf("  ⚠ 取消挂单失败: %v", err)
+	// 检查是否还有剩余持仓，只有全平时才取消挂单
+	positions, err := t.GetPositions()
+	if err == nil {
+		hasRemainingPosition := false
+		for _, pos := range positions {
+			if pos["symbol"] == symbol && pos["side"] == "short" {
+				remainingQty, _ := pos["positionAmt"].(float64)
+				if remainingQty > 0 {
+					hasRemainingPosition = true
+					log.Printf("  ℹ %s 还有剩余空仓 %.4f，保留止损止盈委托", symbol, remainingQty)
+					break
+				}
+			}
+		}
+		// 只有全平时才取消挂单
+		if !hasRemainingPosition {
+			if err := t.CancelAllOrders(symbol); err != nil {
+				log.Printf("  ⚠ 取消挂单失败: %v", err)
+			} else {
+				log.Printf("  ✓ 全平完成，已取消所有挂单")
+			}
+		}
+	} else {
+		// 如果获取持仓失败，为了安全起见，不取消挂单（避免误取消部分平仓后的止损止盈）
+		log.Printf("  ⚠ 无法获取持仓状态，保留挂单以防误取消")
 	}
 
 	return result, nil
@@ -1002,6 +1046,11 @@ func (t *AsterTrader) LimitOpenShort(symbol string, quantity float64, leverage i
 
 // GetOpenOrders Aster暂不支持限价单功能
 func (t *AsterTrader) GetOpenOrders(symbol string) ([]map[string]interface{}, error) {
+	return nil, fmt.Errorf("Aster 暂不支持限价单功能")
+}
+
+// GetOrderStatus 查询订单状态
+func (t *AsterTrader) GetOrderStatus(symbol string, orderID int64) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("Aster 暂不支持限价单功能")
 }
 

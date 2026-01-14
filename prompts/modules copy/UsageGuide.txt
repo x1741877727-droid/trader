@@ -1,0 +1,92 @@
+════ 模块：UsageGuide ════
+
+【推荐组合】
+- 核心层（每轮必需）：
+  * SystemCore（系统定位）
+  * CoreTradingRules（核心规则）
+  * RiskGuard-Flow（流程守门人）
+  * TradingStrategyMatrix（交易策略矩阵，强烈推荐每轮使用）
+
+- 流程层（二选一）：
+  * 有持仓 → HoldPlaybook
+  * 无持仓 → OpenSetup
+
+- 工具层（按需选择）：
+  * TechnicalIndicators（技术指标使用指南，推荐每轮使用）
+  * BestPractices（最佳实践建议，强烈推荐每轮使用）
+  * StructureRules（结构规则，推荐配合BestPractices使用）
+  * MarketStateAndTrend（市场状态与趋势阶段）
+  * RiskManagement（风险管理）
+  * OpportunityScoring（机会质量评估）
+  * MultiAssetOpportunityScan（多币扫描，有持仓且slots>0时使用）
+  * PositionManagement（持仓管理）
+
+- 输出层（每轮必需）：
+  * OutputFormat（输出格式）
+  * DecisionChecklist（决策检查清单）
+
+【快速参考】
+- QuickReference（快速参考卡，可选，用于快速查询核心规则）
+
+【使用步骤】
+1. 复制所需模块内容，按“系统层 → 流程层 → 工具层 → 输出层”顺序拼接成一条消息
+2. 若需要强调执行顺序，可在系统提示后追加：“按 RiskGuard-Flow 执行，输出前复述流程理解”
+3. 当信息太长时，可根据实际需求裁剪掉未用模块，保持重点突出
+4. 模块内容可定期迭代；修改某模块不影响其他模块
+
+【多币覆盖规则】
+1. Portfolio 最大持仓 = 3。positions>0 且 slots>0 时，必须在《HoldPlaybook》之后立刻执行《Multi-Asset Opportunity Scan》，由它负责挑选下一步候选币并决定是否生成开仓计划。
+2. 若 positions=0，直接执行《OpenSetup》（同样遵守“至少覆盖 CandidateCoins 排名前序币种”的要求）。
+3. 多币扫描覆盖范围：至少 min(3, 可用未持仓币数) 个候选币，全部使用 SystemCore 的结构/动量/风控标准，逐一给出“执行 / 拒绝 + 理由”。
+4. 已有持仓的币仍需完整输出《HoldPlaybook》，不得为了多币扫描而压缩止盈/反转/风险分析。
+5. 若某币既在持仓中又在 CandidateCoins 中，请在扫描列表里标注“该币已持仓，仅执行 HoldPlaybook”，并将扫描名额让给其他币。
+
+【模块依赖关系图】
+
+核心层（每轮必需）：
+├─ SystemCore（系统定位）
+├─ CoreTradingRules（核心规则）
+├─ RiskGuard-Flow（流程守门人）
+└─ TradingStrategyMatrix（交易策略矩阵，强烈推荐每轮使用）
+
+流程层（二选一）：
+├─ 有持仓 → HoldPlaybook
+└─ 无持仓 → OpenSetup
+
+工具层（按需选择）：
+├─ TechnicalIndicators（技术指标使用指南，推荐每轮使用）
+├─ BestPractices（最佳实践建议，强烈推荐每轮使用）
+├─ StructureRules（结构规则，推荐配合BestPractices使用）
+├─ MarketStateAndTrend（市场状态判定）
+├─ RiskManagement（风险管理）
+├─ OpportunityScoring（机会质量评估）
+├─ MultiAssetOpportunityScan（多币扫描）
+└─ PositionManagement（持仓管理）
+
+输出层（每轮必需）：
+├─ OutputFormat（输出格式）
+└─ DecisionChecklist（决策检查清单）
+
+【依赖说明】
+- OpenSetup 依赖 MarketStateAndTrend + TradingStrategyMatrix
+- HoldPlaybook 依赖 MarketStateAndTrend（趋势阶段判定）
+- 所有流程层模块都依赖 CoreTradingRules + TradingStrategyMatrix
+- MultiAssetOpportunityScan 依赖 CoreTradingRules + RiskManagement + TradingStrategyMatrix
+
+【冲突优先级提示】
+1. 核心层（SystemCore + CoreTradingRules + RiskGuard-Flow + TradingStrategyMatrix）必须置于最前，此层文本等于全局指令，任何后续模块不得违背。
+2. 流程层顺序：positions>0 → HoldPlaybook →（若 slots>0）MultiAssetOpportunityScan → PositionManagement；positions=0 → OpenSetup。
+3. 工具层（RiskManagement / MarketStateAndTrend / OpportunityScoring 等）仅能在对应流程层之后调用，并在引用时写明"本模块只用于补充，不可单独决策"。
+4. 输出层（OutputFormat + DecisionChecklist）必须放在最末尾，提醒模型进行流程自检与 JSON 输出；若流程未通过自检，要求模型返回 wait 并重述等待条件。
+5. 若任意下层与上层指令冲突，以上层为准；工具层之间冲突时，以更高周期、更强结构信号为准，并说明取舍理由。
+
+【规则引用机制（重要）】
+为避免重复，核心规则统一定义在《CoreTradingRules》模块中。
+其他模块通过简单引用来应用规则，例如：
+- "遵守《CoreTradingRules》规则1：趋势阶段Gate"
+- "遵守《CoreTradingRules》规则2：多时间框架动能共振"
+- "遵守《CoreTradingRules》规则3：关键位突破确认"
+- "遵守《CoreTradingRules》规则4：TP概率与R:R要求"
+- "遵守《CoreTradingRules》规则5：风险管理"
+- "遵守《CoreTradingRules》规则6：逆势交易严格限制"
+- "遵守《CoreTradingRules》规则7：急跌/急涨后反弹交易特殊规则"

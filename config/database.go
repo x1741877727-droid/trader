@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base32"
+	"encoding/json"
 	"fmt"
 	"log"
+	"nofx/review"
 	"strings"
 	"time"
 
@@ -92,6 +94,7 @@ func (d *Database) createTables() error {
 			name TEXT NOT NULL,
 			ai_model_id TEXT NOT NULL,
 			exchange_id TEXT NOT NULL,
+			trader_mode TEXT DEFAULT 'binance',
 			initial_balance REAL NOT NULL,
 			scan_interval_minutes INTEGER DEFAULT 3,
 			is_running BOOLEAN DEFAULT 0,
@@ -123,6 +126,31 @@ func (d *Database) createTables() error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+
+		// Close Review索引表
+		`CREATE TABLE IF NOT EXISTS close_reviews (
+			trade_id TEXT PRIMARY KEY,
+			trader_id TEXT NOT NULL,
+			symbol TEXT NOT NULL,
+			side TEXT NOT NULL,
+			pnl REAL DEFAULT 0,
+			pnl_pct REAL DEFAULT 0,
+			holding_minutes INTEGER DEFAULT 0,
+			risk_score INTEGER DEFAULT 0,
+			execution_score INTEGER DEFAULT 0,
+			signal_score INTEGER DEFAULT 0,
+			summary TEXT,
+			what_went_well TEXT,
+			improvements TEXT,
+			root_cause TEXT,
+			extreme_review TEXT,
+			action_items TEXT,
+			confidence INTEGER DEFAULT 0,
+			reasoning TEXT,
+			file_path TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (trader_id) REFERENCES traders(id) ON DELETE CASCADE
 		)`,
 
 		// 触发器：自动更新 updated_at
@@ -177,17 +205,17 @@ func (d *Database) createTables() error {
 		`ALTER TABLE exchanges ADD COLUMN aster_private_key TEXT DEFAULT ''`,
 		`ALTER TABLE traders ADD COLUMN custom_prompt TEXT DEFAULT ''`,
 		`ALTER TABLE traders ADD COLUMN override_base_prompt BOOLEAN DEFAULT 0`,
-		`ALTER TABLE traders ADD COLUMN is_cross_margin BOOLEAN DEFAULT 1`, // 默认为全仓模式
-		`ALTER TABLE traders ADD COLUMN use_default_coins BOOLEAN DEFAULT 1`, // 默认使用默认币种
-		`ALTER TABLE traders ADD COLUMN custom_coins TEXT DEFAULT ''`, // 自定义币种列表（JSON格式）
-		`ALTER TABLE traders ADD COLUMN btc_eth_leverage INTEGER DEFAULT 5`, // BTC/ETH杠杆倍数
-		`ALTER TABLE traders ADD COLUMN altcoin_leverage INTEGER DEFAULT 5`, // 山寨币杠杆倍数
-		`ALTER TABLE traders ADD COLUMN trading_symbols TEXT DEFAULT ''`, // 交易币种，逗号分隔
-		`ALTER TABLE traders ADD COLUMN use_coin_pool BOOLEAN DEFAULT 0`,           // 是否使用COIN POOL信号源
-		`ALTER TABLE traders ADD COLUMN use_oi_top BOOLEAN DEFAULT 0`,             // 是否使用OI TOP信号源
+		`ALTER TABLE traders ADD COLUMN is_cross_margin BOOLEAN DEFAULT 1`,             // 默认为全仓模式
+		`ALTER TABLE traders ADD COLUMN use_default_coins BOOLEAN DEFAULT 1`,           // 默认使用默认币种
+		`ALTER TABLE traders ADD COLUMN custom_coins TEXT DEFAULT ''`,                  // 自定义币种列表（JSON格式）
+		`ALTER TABLE traders ADD COLUMN btc_eth_leverage INTEGER DEFAULT 5`,            // BTC/ETH杠杆倍数
+		`ALTER TABLE traders ADD COLUMN altcoin_leverage INTEGER DEFAULT 5`,            // 山寨币杠杆倍数
+		`ALTER TABLE traders ADD COLUMN trading_symbols TEXT DEFAULT ''`,               // 交易币种，逗号分隔
+		`ALTER TABLE traders ADD COLUMN use_coin_pool BOOLEAN DEFAULT 0`,               // 是否使用COIN POOL信号源
+		`ALTER TABLE traders ADD COLUMN use_oi_top BOOLEAN DEFAULT 0`,                  // 是否使用OI TOP信号源
 		`ALTER TABLE traders ADD COLUMN system_prompt_template TEXT DEFAULT 'default'`, // 系统提示词模板名称
-		`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`,        // 自定义API地址
-		`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`,     // 自定义模型名称
+		`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`,              // 自定义API地址
+		`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`,           // 自定义模型名称
 	}
 
 	for _, query := range alterQueries {
@@ -245,16 +273,17 @@ func (d *Database) initDefaultData() error {
 
 	// 初始化系统配置 - 创建所有字段，设置默认值，后续由config.json同步更新
 	systemConfigs := map[string]string{
-		"admin_mode":            "true",                                                               // 默认开启管理员模式，便于首次使用
-		"api_server_port":       "8080",                                                              // 默认API端口
-		"use_default_coins":     "true",                                                              // 默认使用内置币种列表
-		"default_coins":         `["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","HYPEUSDT"]`, // 默认币种列表（JSON格式）
-		"max_daily_loss":        "10.0",                                                              // 最大日损失百分比
-		"max_drawdown":          "20.0",                                                              // 最大回撤百分比
-		"stop_trading_minutes":  "60",                                                                // 停止交易时间（分钟）
-		"btc_eth_leverage":      "5",                                                                 // BTC/ETH杠杆倍数
-		"altcoin_leverage":      "5",                                                                 // 山寨币杠杆倍数
-		"jwt_secret":            "",                                                                  // JWT密钥，默认为空，由config.json或系统生成
+		"admin_mode":           "true",                                                      // 默认开启管理员模式，便于首次使用
+		"api_server_port":      "8080",                                                      // 默认API端口
+		"use_default_coins":    "true",                                                      // 默认使用内置币种列表
+		// 默认币种列表（JSON格式）——仅保留 BTC/ETH/SOL/BNB 这 4 个
+		"default_coins":        `["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]`,
+		"max_daily_loss":       "10.0",                                                      // 最大日损失百分比
+		"max_drawdown":         "20.0",                                                      // 最大回撤百分比
+		"stop_trading_minutes": "60",                                                        // 停止交易时间（分钟）
+		"btc_eth_leverage":     "5",                                                         // BTC/ETH杠杆倍数
+		"altcoin_leverage":     "5",                                                         // 山寨币杠杆倍数
+		"jwt_secret":           "",                                                          // JWT密钥，默认为空，由config.json或系统生成
 	}
 
 	for key, value := range systemConfigs {
@@ -354,13 +383,13 @@ func (d *Database) migrateExchangesTable() error {
 
 // User 用户配置
 type User struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	PasswordHash string   `json:"-"` // 不返回到前端
-	OTPSecret   string    `json:"-"` // 不返回到前端
-	OTPVerified bool      `json:"otp_verified"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"` // 不返回到前端
+	OTPSecret    string    `json:"-"` // 不返回到前端
+	OTPVerified  bool      `json:"otp_verified"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // AIModelConfig AI模型配置
@@ -379,36 +408,37 @@ type AIModelConfig struct {
 
 // ExchangeConfig 交易所配置
 type ExchangeConfig struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	Enabled   bool      `json:"enabled"`
-	APIKey    string    `json:"apiKey"`
-	SecretKey string    `json:"secretKey"`
-	Testnet   bool      `json:"testnet"`
+	ID        string `json:"id"`
+	UserID    string `json:"user_id"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Enabled   bool   `json:"enabled"`
+	APIKey    string `json:"apiKey"`
+	SecretKey string `json:"secretKey"`
+	Testnet   bool   `json:"testnet"`
 	// Hyperliquid 特定字段
 	HyperliquidWalletAddr string `json:"hyperliquidWalletAddr"`
 	// Aster 特定字段
-	AsterUser       string `json:"asterUser"`
-	AsterSigner     string `json:"asterSigner"`
-	AsterPrivateKey string `json:"asterPrivateKey"`
+	AsterUser       string    `json:"asterUser"`
+	AsterSigner     string    `json:"asterSigner"`
+	AsterPrivateKey string    `json:"asterPrivateKey"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // TraderRecord 交易员配置（数据库实体）
 type TraderRecord struct {
-	ID                 string    `json:"id"`
-	UserID             string    `json:"user_id"`
-	Name               string    `json:"name"`
-	AIModelID          string    `json:"ai_model_id"`
-	ExchangeID         string    `json:"exchange_id"`
-	InitialBalance     float64   `json:"initial_balance"`
-	ScanIntervalMinutes int      `json:"scan_interval_minutes"`
-	IsRunning          bool      `json:"is_running"`
-	BTCETHLeverage     int       `json:"btc_eth_leverage"`     // BTC/ETH杠杆倍数
-	AltcoinLeverage    int       `json:"altcoin_leverage"`     // 山寨币杠杆倍数
+	ID                   string    `json:"id"`
+	UserID               string    `json:"user_id"`
+	Name                 string    `json:"name"`
+	AIModelID            string    `json:"ai_model_id"`
+	ExchangeID           string    `json:"exchange_id"`
+	TraderMode           string    `json:"trader_mode"`            // "paper" 或 "binance"，默认 "binance"
+	InitialBalance       float64   `json:"initial_balance"`
+	ScanIntervalMinutes  int       `json:"scan_interval_minutes"`
+	IsRunning            bool      `json:"is_running"`
+	BTCETHLeverage       int       `json:"btc_eth_leverage"`       // BTC/ETH杠杆倍数
+	AltcoinLeverage      int       `json:"altcoin_leverage"`       // 山寨币杠杆倍数
 	TradingSymbols       string    `json:"trading_symbols"`        // 交易币种，逗号分隔
 	UseCoinPool          bool      `json:"use_coin_pool"`          // 是否使用COIN POOL信号源
 	UseOITop             bool      `json:"use_oi_top"`             // 是否使用OI TOP信号源
@@ -422,12 +452,36 @@ type TraderRecord struct {
 
 // UserSignalSource 用户信号源配置
 type UserSignalSource struct {
-	ID           int       `json:"id"`
-	UserID       string    `json:"user_id"`
-	CoinPoolURL  string    `json:"coin_pool_url"`
-	OITopURL     string    `json:"oi_top_url"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID          int       `json:"id"`
+	UserID      string    `json:"user_id"`
+	CoinPoolURL string    `json:"coin_pool_url"`
+	OITopURL    string    `json:"oi_top_url"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// CloseReviewSummary 存储在数据库中的close review概要
+type CloseReviewSummary struct {
+	TradeID                   string                         `json:"trade_id"`
+	TraderID                  string                         `json:"trader_id"`
+	Symbol                    string                         `json:"symbol"`
+	Side                      string                         `json:"side"`
+	PnL                       float64                        `json:"pnl"`
+	PnLPct                    float64                        `json:"pnl_pct"`
+	HoldingMinutes            int                            `json:"holding_minutes"`
+	RiskScore                 int                            `json:"risk_score"`
+	ExecutionScore            int                            `json:"execution_score"`
+	SignalScore               int                            `json:"signal_score"`
+	Summary                   string                         `json:"summary"`
+	WhatWentWell              []string                       `json:"what_went_well"`
+	Improvements              []string                       `json:"improvements"`
+	RootCause                 string                         `json:"root_cause"`
+	ExtremeInterventionReview string                         `json:"extreme_intervention_review"`
+	ActionItems               []review.CloseReviewActionItem `json:"action_items"`
+	Confidence                int                            `json:"confidence"`
+	Reasoning                 string                         `json:"reasoning"`
+	FilePath                  string                         `json:"file_path"`
+	CreatedAt                 time.Time                      `json:"created_at"`
 }
 
 // GenerateOTPSecret 生成OTP密钥
@@ -859,7 +913,9 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 			COALESCE(t.use_oi_top, 0) as use_oi_top, COALESCE(t.custom_prompt, '') as custom_prompt, 
 			COALESCE(t.override_base_prompt, 0) as override_base_prompt, COALESCE(t.is_cross_margin, 1) as is_cross_margin,
 			t.created_at, t.updated_at,
-			a.id, a.user_id, a.name, a.provider, a.enabled, a.api_key, a.created_at, a.updated_at,
+			a.id, a.user_id, a.name, a.provider, a.enabled, a.api_key, 
+			COALESCE(a.custom_api_url, '') as custom_api_url, COALESCE(a.custom_model_name, '') as custom_model_name,
+			a.created_at, a.updated_at,
 			e.id, e.user_id, e.name, e.type, e.enabled, e.api_key, e.secret_key, e.testnet,
 			COALESCE(e.hyperliquid_wallet_addr, '') as hyperliquid_wallet_addr,
 			COALESCE(e.aster_user, '') as aster_user,
@@ -877,6 +933,7 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 		&trader.UseOITop, &trader.CustomPrompt, &trader.OverrideBasePrompt, &trader.IsCrossMargin,
 		&trader.CreatedAt, &trader.UpdatedAt,
 		&aiModel.ID, &aiModel.UserID, &aiModel.Name, &aiModel.Provider, &aiModel.Enabled, &aiModel.APIKey,
+		&aiModel.CustomAPIURL, &aiModel.CustomModelName,
 		&aiModel.CreatedAt, &aiModel.UpdatedAt,
 		&exchange.ID, &exchange.UserID, &exchange.Name, &exchange.Type, &exchange.Enabled,
 		&exchange.APIKey, &exchange.SecretKey, &exchange.Testnet,
@@ -885,6 +942,9 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 	)
 
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil, nil, fmt.Errorf("交易员配置不存在或关联的AI模型/交易所已被删除")
+		}
 		return nil, nil, nil, err
 	}
 
@@ -938,6 +998,173 @@ func (d *Database) UpdateUserSignalSource(userID, coinPoolURL, oiTopURL string) 
 		WHERE user_id = ?
 	`, coinPoolURL, oiTopURL, userID)
 	return err
+}
+
+// UpsertCloseReview 创建或更新close review概要
+func (d *Database) UpsertCloseReview(summary *CloseReviewSummary) error {
+	if summary == nil {
+		return fmt.Errorf("close review summary 不能为空")
+	}
+
+	createdAt := summary.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
+	whatJSON, _ := json.Marshal(summary.WhatWentWell)
+	improveJSON, _ := json.Marshal(summary.Improvements)
+	actionJSON, _ := json.Marshal(summary.ActionItems)
+
+	_, err := d.db.Exec(`
+		INSERT INTO close_reviews (
+			trade_id, trader_id, symbol, side, pnl, pnl_pct, holding_minutes,
+			risk_score, execution_score, signal_score, summary, what_went_well,
+			improvements, root_cause, extreme_review, action_items, confidence,
+			reasoning, file_path, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(trade_id) DO UPDATE SET
+			trader_id = excluded.trader_id,
+			symbol = excluded.symbol,
+			side = excluded.side,
+			pnl = excluded.pnl,
+			pnl_pct = excluded.pnl_pct,
+			holding_minutes = excluded.holding_minutes,
+			risk_score = excluded.risk_score,
+			execution_score = excluded.execution_score,
+			signal_score = excluded.signal_score,
+			summary = excluded.summary,
+			what_went_well = excluded.what_went_well,
+			improvements = excluded.improvements,
+			root_cause = excluded.root_cause,
+			extreme_review = excluded.extreme_review,
+			action_items = excluded.action_items,
+			confidence = excluded.confidence,
+			reasoning = excluded.reasoning,
+			file_path = excluded.file_path,
+			created_at = excluded.created_at
+	`, summary.TradeID, summary.TraderID, summary.Symbol, summary.Side,
+		summary.PnL, summary.PnLPct, summary.HoldingMinutes,
+		summary.RiskScore, summary.ExecutionScore, summary.SignalScore,
+		summary.Summary, string(whatJSON), string(improveJSON), summary.RootCause,
+		summary.ExtremeInterventionReview, string(actionJSON), summary.Confidence,
+		summary.Reasoning, summary.FilePath, createdAt)
+	return err
+}
+
+// GetCloseReview 获取单个close review概要
+func (d *Database) GetCloseReview(tradeID string) (*CloseReviewSummary, error) {
+	row := d.db.QueryRow(`
+		SELECT trade_id, trader_id, symbol, side, pnl, pnl_pct, holding_minutes,
+		       risk_score, execution_score, signal_score, summary, what_went_well,
+		       improvements, root_cause, extreme_review, action_items, confidence,
+		       reasoning, file_path, created_at
+		FROM close_reviews
+		WHERE trade_id = ?
+	`, tradeID)
+
+	return scanCloseReviewSummary(row)
+}
+
+// ListCloseReviews 获取指定trader的close reviews
+func (d *Database) ListCloseReviews(traderID string, limit int) ([]*CloseReviewSummary, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	rows, err := d.db.Query(`
+		SELECT trade_id, trader_id, symbol, side, pnl, pnl_pct, holding_minutes,
+		       risk_score, execution_score, signal_score, summary, what_went_well,
+		       improvements, root_cause, extreme_review, action_items, confidence,
+		       reasoning, file_path, created_at
+		FROM close_reviews
+		WHERE trader_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, traderID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*CloseReviewSummary
+	for rows.Next() {
+		summary, scanErr := scanCloseReviewSummary(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		results = append(results, summary)
+	}
+	return results, rows.Err()
+}
+
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanCloseReviewSummary(scanner rowScanner) (*CloseReviewSummary, error) {
+	var (
+		summary     CloseReviewSummary
+		whatJSON    sql.NullString
+		improveJSON sql.NullString
+		actionJSON  sql.NullString
+		createdAt   time.Time
+	)
+
+	err := scanner.Scan(
+		&summary.TradeID,
+		&summary.TraderID,
+		&summary.Symbol,
+		&summary.Side,
+		&summary.PnL,
+		&summary.PnLPct,
+		&summary.HoldingMinutes,
+		&summary.RiskScore,
+		&summary.ExecutionScore,
+		&summary.SignalScore,
+		&summary.Summary,
+		&whatJSON,
+		&improveJSON,
+		&summary.RootCause,
+		&summary.ExtremeInterventionReview,
+		&actionJSON,
+		&summary.Confidence,
+		&summary.Reasoning,
+		&summary.FilePath,
+		&createdAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	summary.WhatWentWell = decodeStringArray(whatJSON.String)
+	summary.Improvements = decodeStringArray(improveJSON.String)
+	summary.ActionItems = decodeActionItems(actionJSON.String)
+	summary.CreatedAt = createdAt
+	return &summary, nil
+}
+
+func decodeStringArray(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+
+	var arr []string
+	if err := json.Unmarshal([]byte(raw), &arr); err != nil {
+		return []string{}
+	}
+	return arr
+}
+
+func decodeActionItems(raw string) []review.CloseReviewActionItem {
+	if strings.TrimSpace(raw) == "" {
+		return []review.CloseReviewActionItem{}
+	}
+
+	var items []review.CloseReviewActionItem
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return []review.CloseReviewActionItem{}
+	}
+	return items
 }
 
 // Close 关闭数据库连接

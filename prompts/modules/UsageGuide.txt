@@ -1,0 +1,25 @@
+【UsageGuide｜模块使用说明（给你维护系统用）】
+
+一、模块在系统提示词中的加载顺序（代码层）
+SystemCore → CoreTradingRules → RiskGuard-Flow → positions token →
+（无持仓：OpenSetup → TradingStrategyMatrix → TechnicalIndicators → RiskManagement）
+（有持仓：HoldPlaybook → MultiAssetOpportunityScan → PositionManagement → TradingStrategyMatrix → TechnicalIndicators → RiskManagement）
+→ OutputFormat → DecisionChecklist
+
+二、建议的代码改动（强烈建议）
+1) 把 OpportunityScoring 加入 system prompt（否则这个模块不会生效）：
+- 在 TradingStrategyMatrix 之后 appendModule("OpportunityScoring")
+2) 建议把 QuickReference 也加入 tool 层（减少模型误解语义）：
+- 在 RiskManagement 之后 appendModule("QuickReference")
+3) 修复 buildUserPrompt 中 daily_pair_trades 的反引号问题：
+- 现在只有结尾 ```，没有开头，容易扰乱模型输出；建议去掉所有 ``` 或补齐成成对。
+
+三、常见失败原因与修复
+- 保证金超标：模型把名义价值当保证金 → 强化“position_size_usd=保证金”并给例子；DecisionChecklist 自检。
+- JSON 解析失败：思维链中出现方括号导致提取错误 → 强制禁止括号；或改造 extractCoTTrace 使用更稳健的 arrayStart 逻辑。
+- 字段名不一致：stop_price/stop_loss 混用 → OutputFormat 统一字段名并删除旧字段。
+- take_profit != tp3：后端未校验但会导致执行与复盘混乱 → 建议后端加校验。
+
+四、维护建议（更像专业交易团队）
+- 给每个策略（S/A/B/C/D/E）写一页“Playbook”：触发、失效、常见陷阱、最优执行方式。
+- 每周用 TradeReview 汇总：胜率、期望值、最大回撤、最差场景，并把结论回写到模块。

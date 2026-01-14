@@ -1,0 +1,78 @@
+════ 模块：OutputFormat（输出格式规范 — 最小必填版）════
+
+定位：
+- 定义后端必须校验的最小 JSON schema（versioned），详细计算与证据放在思维链 / reasoning（中文、通俗易懂）。JSON 仅用于后端执行与快速校验，reasoning 用于人类审计与核对。
+
+最小 JSON schema（示例）：
+[
+  {
+    "version":"v1",
+    "action":"open_long|open_short|limit_open_long|wait|partial_close_long|close_long|update_stop_loss",
+    "symbol":"BTCUSDT",
+    "execution_preference":"auto",   # auto|market|limit（auto=系统默认MARKET）
+    "leverage": 65,                  # 开仓时必填（整数）
+    "position_size_usd": 1000.0,     # 开仓时必填（实际占用保证金，USDT）
+    "stop_price": 88300.0,           # 开仓时必填（止损价格）
+    "tp1": 92000.0,                  # 开仓时必填（分批止盈）
+    "tp2": 93000.0,                  # 开仓时必填
+    "tp3": 94000.0,                  # 开仓时必填（TP3 = take_profit）
+    "confidence": 80,                # 0-100（整数）
+    "reasoning": "ExecutionGate=limit_preferred; 我保持auto(默认市价)，等待更清晰信号。"
+  }
+]
+
+字段说明（最小必填）
+- version：schema 版本号（如 "v1"），变更须同步后端。
+- action / symbol / confidence / reasoning：通用必填（reasoning 为中文简洁说明，详见下节）。
+- execution_preference：auto|market|limit（auto=系统默认MARKET，market=强制市价，limit=强制限价）。每个symbol的JSON必须包含。
+- 开仓必填：leverage, position_size_usd, stop_price, tp1/tp2/tp3。
+- 其他动作：limit_price（限价挂单）、order_id（取消限价单）、close_quantity/close_ratio（部分平仓）在对应 action 时才必填。
+- 可选但建议写在 reasoning：evidence、execution_assumptions、stop_anchor、stop_vs_atr、rr_ratio 等。若需要自动化稽核再把某些字段改为必填。
+
+ExecutionGate 执行约束（必须遵守）：
+- ExecutionGate 是执行层风险提示，不改变"是否开仓"的决策权
+- 默认执行方式是 MARKET（市价）
+- gate.mode=limit_only：禁止市价，系统会强制改成限价执行，JSON必须输出 execution_preference="limit"
+- gate.mode=limit_preferred：默认仍可市价，但建议可选限价改善价格，JSON可输出 execution_preference="auto" 或 "limit"
+- gate.mode=market_ok：正常，市价/限价都可，JSON可输出 execution_preference="auto" 或 "market" 或 "limit"
+- JSON 输出必须包含 execution_preference 字段
+- reasoning 中至少一句话明确提到 ExecutionGate（例如 "ExecutionGate=limit_preferred，所以我保持 market 执行/或改成 limit"）
+
+
+
+—— 将 previously-required 动作特定最低要求与示例已整合：
+1) open_long / open_short（市价开仓 - 最小必填）
+- 必需字段：leverage, position_size_usd, stop_price, tp1, tp2, tp3, confidence, reasoning
+-、
+ 说明：position_size_usd 为 AI 提议的实际保证金（USDT），必须在账户净值的5%-13%之间。后端会基于 RiskManagement 计算并可能调整 final_margin。AI 应在 CoT（思维链）中明确计算：position_size_usd = 账户净值 × 百分比（5%-13%）。JSON.reasoning 仅保留单行关键数值摘要。若后端校验失败（如超出 MAX_MARGIN_PCT），系统将拒绝执行并要求 AI 重试或返回 wait。
+
+  示例：
+  - 账户净值 50 USDT：position_size_usd 应在 2.50-6.50 USDT 之间
+  - 账户净值 100 USDT：position_size_usd 应在 3.00-13.00 USDT 之间
+
+2) limit_open_long / limit_open_short（限价开仓 - 最小必填）
+- 必需字段：同 open_xxx 的最小必填项外，额外 limit_price
+- 建议：限价相关的执行假设（如 execution_assumptions）应放在 CoT（思维链）中，说明是否偏好 probe/limit、预期滑点等信息；JSON.reasoning 可保留单行总结。
+
+3) close_long / close_short（全平）
+- 若未提供 close_quantity/close_ratio，系统按全平处理
+- CoT（思维链） 必须包含：TP概率、反转概率、风险提示
+- 若因极端介入提前平仓，需額外写明觸發信号与确认层级
+
+4) partial_close_long / partial_close_short（部分平仓）
+- 必须提供 close_quantity 或 close_ratio（至少其一）
+- CoT（思维链） 必须包含：到达点位、本次平仓比例、剩余仓位计划、TP概率/反转概率/风险提示（示例模板参见上）
+
+5) hold / wait / update_stop_loss / update_take_profit / cancel_limit_order / confidence 等
+- 对应字段与 reasoning 要求同上（見最小 schema + reasoning 模板）
+
+注意与流程
+- 若后端校验失败，后端将拒绝并触发 engine 的格式纠错/重试流程（現有邏輯会尝试让 AI 修正 JSON）。  
+
+强制数值计算输出规范（必须）
+- 在 CoT（思维链）中必须逐步列出关键算术步骤：entry、stop、target → risk = |entry - stop| → reward = |target - entry| → rr = reward / risk（示例见下）。
+- JSON 中必须包含数值字段（machine-readable）：`"entry"`,`"stop"`,`"target"`,`"risk"`,`"reward"`,`"rr"`，且这些字段的值必须与 CoT 中的逐步计算一致（后端将复算并校验，允许最大浮点误差 0.01）。
+- 单行 JSON 示例（仅数字字段，紧接在 CoT 之后输出）：
+  {"version":"v1","action":"open_long","symbol":"BTCUSDT","entry":92500,"stop":92000,"target":94000,"risk":500,"reward":1500,"rr":3.0,"confidence":80,"reasoning":"daily_pair_trades=0;breadth_score=28"}
+
+注：JSON 中的 `reasoning` 仍需为一行简短摘要；所有详细分析与证据必须保留在 CoT 中，且 CoT 必须展示计算步骤的逐项数值以便后端复算。

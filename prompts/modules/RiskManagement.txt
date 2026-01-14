@@ -1,0 +1,91 @@
+【RiskManagement｜风险与仓位规则（必须与后端校验一致）】
+
+核心语义：
+- position_size_usd = 本单“保证金”（不是名义价值）
+- 名义价值 = 保证金 × 杠杆（后端会校验 notional ≥ 20）
+
+开仓硬规则（建议按后端当前逻辑执行）：
+1) 杠杆范围：
+   - 主流币（BTC/ETH/SOL/BNB）：最低更高（后端要求≥65），上限由系统设置
+   - 山寨币：后端要求≥30，上限由系统设置
+2) 保证金区间（与后端校验一致）：
+   - 后端校验范围：账户净值的 5%-13%
+   - 边界稳定策略：后端会自动夹紧轻微超出边界的值（容差0.3%或0.2U）
+   - 为避免依赖自动夹紧，建议选择 6%-12% 的安全区间，不要用刚好5%或13%
+3) 止损与止盈合法：
+   - 多单：stop_loss < take_profit
+   - 空单：stop_loss > take_profit
+4) TP 分段必须给 tp1/tp2/tp3，并且建议 take_profit = tp3
+5) 风险真实性（用于后端校验）：
+   risk_usd ≈ notional × |entry-stop|/entry
+6) 止损必须先于爆仓（高杠杆必要纪律）：
+   |entry-stop|/entry 必须 < 0.85/leverage
+   否则会先爆仓，止损无效 → 必须降低杠杆或收紧止损/换更好入场
+7) execution_gate：
+   - limit_only：只能 limit_open_* 或 wait
+   - market_ok：仍优先 limit；只有“突破+回踩确认”才允许市价
+
+机会等级纪律（强制输出，便于系统校验与风控分档）：
+- 任何开仓（open_* 或 limit_open_*）的 reasoning 必须以：
+  grade=X score=YY
+  开头（例：grade=S score=88）
+- grade 映射：
+  S：85-100
+  A：75-84
+  B：65-74（建议只允许 limit_open_*，不建议市价）
+  C：55-64（默认 wait）
+  D：45-54（wait）
+  F：0-44（wait）
+
+附加纪律：
+- 同币当日第2单：必须提高标准（至少 A 且更强确认），否则 wait
+- 震荡/Chop：默认 wait，除非已经到边缘且满足 Range 边缘策略
+
+风险计算建议（写进 reasoning）：
+- 风险金额 risk_usd ≈ 保证金 × 预估止损幅度%（给出一个合理估算即可）
+- 若 ATR% 高：减少杠杆或缩小保证金，不要硬扛。
+
+6) 分层风控纪律：
+   - 小资金激进模式(≤200U)：仅BTC/ETH/SOL，杠杆40-100x，但仅S/A级机会+execution_gate许可+funding/OI无风险时才允许高杠杆
+   - 标准模式(200-1000U)：杠杆≤75x，注重资金管理和风险分散
+   - 保守模式(>1000U)：杠杆≤30x，强化持仓管理和组合风险控制
+   - 高杠杆不是默认选择，必须在reasoning中明确说明使用理由
+
+执行建议：
+- execution.mode=limit_only：必须限价或 wait
+- spread_bps 高/深度差：限价优先
+
+【挂单稳定性规则｜强制】
+新挂的限价单（< 9 分钟 / < 3 个周期）默认禁止取消。除非满足"硬失效条件"。
+
+只有出现以下任一"硬失效条件"才允许 cancel_limit_order：
+- 价格在未成交前已经触发/穿越该单的止损失效位（说明 thesis 已破坏）
+- 高周期结构反转（例如 4h/1h 从与原 thesis 同向 → 明确反向，且给出证据：BOS/CHoCH 变化）
+- 执行前提不再成立（例如 execution gate 从 limit_preferred 变成 limit_only/market_ok 并导致原入场逻辑无意义；或点差/深度恶化到"不可成交/滑点巨大"）
+- 超过 TTL（比如 30 分钟）仍未成交且价格长期远离（远离阈值由波动决定，至少 >0.6%）
+
+如果没有硬失效：必须输出 hold / wait，并写"继续等待 + 原 thesis + 触发/失效条件"，禁止改成相反方向的新开仓。
+
+每次决定"继续挂单/取消挂单"，必须先写一行：本周期相对上周期发生了什么变化；如果变化不足以触发硬失效，则不得取消。
+
+【JSON 字段规范（必填）】
+- 对于任何开仓动作（open_xxx），JSON 必须包含：
+  * action: "open_long" | "open_short" | "limit_open_long" | ...
+  * leverage
+  * position_size_usd
+  * stop_loss
+  * tp1, tp2, tp3
+  * take_profit
+  * confidence (0-100)
+  * risk_usd
+  * reasoning (简要 human-readable)
+
+- 可选字段（写在 CoT 或 reasoning 中即可，不强制出现在 JSON）：
+  * entry_price
+  * stop_anchor (文字描述 + 周期)
+  * stop_distance_pct
+  * atr14_pct
+  * tp1_prob, tp2_prob, tp3_prob
+  * rr_ratio
+
+- 明确说明：后端不校验的统计字段不要强制出现在 JSON（可写在思维链）

@@ -1,16 +1,24 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"nofx/auth"
+	"nofx/backtest"
 	"nofx/config"
 	"nofx/decision"
+	"nofx/logger"
 	"nofx/manager"
+	"nofx/market"
+	"nofx/mcp"
+	"nofx/review"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +31,9 @@ type Server struct {
 	traderManager *manager.TraderManager
 	database      *config.Database
 	port          int
+	// SSE 流管理
+	streamChannels map[string]chan string // trader_id -> channel
+	streamMutex    sync.RWMutex
 }
 
 // NewServer 创建API服务器
@@ -36,10 +47,11 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 	router.Use(corsMiddleware())
 
 	s := &Server{
-		router:        router,
-		traderManager: traderManager,
-		database:      database,
-		port:          port,
+		router:         router,
+		traderManager:  traderManager,
+		database:       database,
+		port:           port,
+		streamChannels: make(map[string]chan string),
 	}
 
 	// 设置路由
@@ -127,6 +139,23 @@ func (s *Server) setupRoutes() {
 			protected.GET("/statistics", s.handleStatistics)
 			protected.GET("/equity-history", s.handleEquityHistory)
 			protected.GET("/performance", s.handlePerformance)
+			protected.GET("/cycle-check", s.handleCycleCheck)
+			protected.GET("/close-reviews", s.handleListCloseReviews)
+			protected.GET("/trades/:trade_id/close-review", s.handleGetCloseReview)
+			protected.POST("/trades/:trade_id/close-review", s.handleCreateCloseReview)
+			protected.POST("/review-loss-trades", s.handleReviewLossTrades)
+			protected.POST("/trades/:trade_id/review", s.handleReviewSingleTrade)
+
+			// K线数据
+			protected.GET("/klines", s.handleKlines)
+
+			// 回测（基于规则引擎的离线分析，用于评估硬规则和模块化提示词的匹配度）
+			protected.POST("/backtest", s.handleBacktest)
+			protected.GET("/backtest/status", s.handleBacktestStatus)
+
+			// AI 实时思考流（SSE）
+			protected.GET("/ai/stream", s.handleAIStream)
+			protected.POST("/ai/decision/stream", s.handleAIDecisionStream)
 		}
 	}
 }
@@ -172,6 +201,103 @@ func (s *Server) handleGetSystemConfig(c *gin.Context) {
 		"btc_eth_leverage": btcEthLeverage,
 		"altcoin_leverage": altcoinLeverage,
 	})
+}
+
+// BacktestRequest 简化版回测请求
+type BacktestRequest struct {
+	Symbols      []string `json:"symbols"`
+	Start        string   `json:"start"` // "2006-01-02 15:04:05"
+	End          string   `json:"end"`   // "2006-01-02 15:04:05"
+	IntervalMins int      `json:"interval_minutes"`
+}
+
+// handleBacktest 提交一个新的回测任务（异步），返回 job_id，前端可轮询进度
+func (s *Server) handleBacktest(c *gin.Context) {
+	var req BacktestRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	// 解析时间
+	start := time.Now().AddDate(0, 0, -7) // 默认最近7天
+	end := time.Now()
+	var err error
+
+	if req.Start != "" {
+		start, err = time.Parse("2006-01-02 15:04:05", req.Start)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start time format"})
+			return
+		}
+	}
+	if req.End != "" {
+		end, err = time.Parse("2006-01-02 15:04:05", req.End)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time format"})
+			return
+		}
+	}
+
+	interval := 3
+	if req.IntervalMins > 0 {
+		interval = req.IntervalMins
+	}
+
+	btParams := backtest.Params{
+		Symbols:      req.Symbols,
+		StartTime:    start,
+		EndTime:      end,
+		ScanInterval: time.Duration(interval) * time.Minute,
+	}
+
+	job := backtest.StartJob(btParams)
+
+	c.JSON(http.StatusOK, gin.H{
+		"job_id":        job.ID,
+		"status":        job.Status,
+		"total_cycles":  job.TotalCycles,
+		"current_cycle": job.CurrentCycle,
+		"started_at":    job.StartedAt,
+	})
+}
+
+// handleBacktestStatus 查询回测任务进度/结果
+func (s *Server) handleBacktestStatus(c *gin.Context) {
+	jobID := c.Query("job_id")
+	if jobID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id is required"})
+		return
+	}
+
+	job, ok := backtest.GetJob(jobID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+		return
+	}
+
+	// 构造简洁响应，包含进度和结果摘要
+	resp := gin.H{
+		"job_id":        job.ID,
+		"status":        job.Status,
+		"error":         job.Error,
+		"total_cycles":  job.TotalCycles,
+		"current_cycle": job.CurrentCycle,
+		"params":        job.Params,
+		"started_at":    job.StartedAt,
+		"finished_at":   job.FinishedAt,
+	}
+
+	if job.Result != nil && job.Result.Statistics != nil {
+		stats := job.Result.Statistics
+		resp["statistics"] = stats
+		resp["wait_rate"] = stats.WaitRate()
+		resp["open_rate"] = stats.OpenRate()
+		resp["top_waitReasons"] = stats.TopWaitReasons(10)
+		resp["top_ruleFails"] = stats.TopRuleFailures(10)
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // getTraderFromQuery 从query参数获取trader
@@ -754,6 +880,29 @@ func (s *Server) handleTraderList(c *gin.Context) {
 			}
 		}
 
+		// 解析候选币种列表
+		var candidateCoins []string
+		if trader.TradingSymbols != "" {
+			symbols := strings.Split(trader.TradingSymbols, ",")
+			for _, symbol := range symbols {
+				symbol = strings.TrimSpace(symbol)
+				if symbol != "" {
+					candidateCoins = append(candidateCoins, symbol)
+				}
+			}
+		}
+		// 如果没有配置币种，使用默认币种
+		if len(candidateCoins) == 0 {
+			defaultCoinsStr, _ := s.database.GetSystemConfig("default_coins")
+			if defaultCoinsStr != "" {
+				json.Unmarshal([]byte(defaultCoinsStr), &candidateCoins)
+			}
+			if len(candidateCoins) == 0 {
+				// 使用硬编码的默认币种
+				candidateCoins = []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "HYPEUSDT"}
+			}
+		}
+
 		// 返回完整的 AIModelID（如 "admin_deepseek"），不要截断
 		// 前端需要完整 ID 来验证模型是否存在（与 handleGetTraderConfig 保持一致）
 		result = append(result, map[string]interface{}{
@@ -763,6 +912,7 @@ func (s *Server) handleTraderList(c *gin.Context) {
 			"exchange_id":     trader.ExchangeID,
 			"is_running":      isRunning,
 			"initial_balance": trader.InitialBalance,
+			"candidate_coins": candidateCoins, // 添加候选币种列表
 		})
 	}
 
@@ -941,7 +1091,7 @@ func (s *Server) handleDecisions(c *gin.Context) {
 	c.JSON(http.StatusOK, records)
 }
 
-// handleLatestDecisions 最新决策日志（最近5条，最新的在前）
+// handleLatestDecisions 最新决策日志（最近100条，最新的在前）
 func (s *Server) handleLatestDecisions(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
@@ -955,7 +1105,8 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 		return
 	}
 
-	records, err := trader.GetDecisionLogger().GetLatestRecords(5)
+	// 获取最近100条决策记录（从5条改为100条）
+	records, err := trader.GetDecisionLogger().GetLatestRecords(100)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("获取决策日志失败: %v", err),
@@ -1118,15 +1269,107 @@ func (s *Server) handlePerformance(c *gin.Context) {
 		return
 	}
 
-	// 分析最近100个周期的交易表现（避免长期持仓的交易记录丢失）
-	// 假设每3分钟一个周期，100个周期 = 5小时，足够覆盖大部分交易
-	performance, err := trader.GetDecisionLogger().AnalyzePerformance(100)
+	// 分析全部历史交易表现（用于AI学习与数据面板展示）
+	// 传入0表示获取全部记录，不限制周期数量
+	performance, err := trader.GetDecisionLogger().AnalyzePerformance(0)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("分析历史表现失败: %v", err),
 		})
 		return
 	}
+
+	// 过滤：只显示2024年11月20日之后的交易
+	filterDate := time.Date(2025, 11, 20, 0, 0, 0, 0, time.UTC)
+	filteredTrades := []logger.TradeOutcome{}
+	for _, trade := range performance.RecentTrades {
+		if trade.CloseTime.After(filterDate) || trade.CloseTime.Equal(filterDate) {
+			filteredTrades = append(filteredTrades, trade)
+		}
+	}
+
+	// 重新计算统计指标
+	performance.RecentTrades = filteredTrades
+	performance.TotalTrades = len(filteredTrades)
+	performance.WinningTrades = 0
+	performance.LosingTrades = 0
+	totalWinAmount := 0.0
+	totalLossAmount := 0.0
+
+	// 重新计算币种统计
+	performance.SymbolStats = make(map[string]*logger.SymbolPerformance)
+	bestPnL := -999999.0
+	worstPnL := 999999.0
+	bestSymbol := ""
+	worstSymbol := ""
+
+	for _, trade := range filteredTrades {
+		// 分类交易
+		if trade.PnL > 0 {
+			performance.WinningTrades++
+			totalWinAmount += trade.PnL
+		} else if trade.PnL < 0 {
+			performance.LosingTrades++
+			totalLossAmount += trade.PnL
+		}
+
+		// 更新币种统计
+		if _, exists := performance.SymbolStats[trade.Symbol]; !exists {
+			performance.SymbolStats[trade.Symbol] = &logger.SymbolPerformance{
+				Symbol: trade.Symbol,
+			}
+		}
+		stats := performance.SymbolStats[trade.Symbol]
+		stats.TotalTrades++
+		stats.TotalPnL += trade.PnL
+		if trade.PnL > 0 {
+			stats.WinningTrades++
+		} else if trade.PnL < 0 {
+			stats.LosingTrades++
+		}
+
+		// 更新最佳/最差币种
+		if stats.TotalPnL > bestPnL {
+			bestPnL = stats.TotalPnL
+			bestSymbol = trade.Symbol
+		}
+		if stats.TotalPnL < worstPnL {
+			worstPnL = stats.TotalPnL
+			worstSymbol = trade.Symbol
+		}
+	}
+
+	// 计算平均盈亏
+	if performance.WinningTrades > 0 {
+		performance.AvgWin = totalWinAmount / float64(performance.WinningTrades)
+	}
+	if performance.LosingTrades > 0 {
+		performance.AvgLoss = totalLossAmount / float64(performance.LosingTrades)
+	}
+
+	// 计算胜率
+	if performance.TotalTrades > 0 {
+		performance.WinRate = (float64(performance.WinningTrades) / float64(performance.TotalTrades)) * 100
+	}
+
+	// 计算盈亏比
+	// totalLossAmount 是负数，所以取负号得到绝对值
+	if totalLossAmount != 0 {
+		performance.ProfitFactor = totalWinAmount / (-totalLossAmount)
+	} else if totalWinAmount > 0 {
+		performance.ProfitFactor = 999.0
+	}
+
+	// 计算各币种胜率和平均盈亏
+	for _, stats := range performance.SymbolStats {
+		if stats.TotalTrades > 0 {
+			stats.WinRate = (float64(stats.WinningTrades) / float64(stats.TotalTrades)) * 100
+			stats.AvgPnL = stats.TotalPnL / float64(stats.TotalTrades)
+		}
+	}
+
+	performance.BestSymbol = bestSymbol
+	performance.WorstSymbol = worstSymbol
 
 	c.JSON(http.StatusOK, performance)
 }
@@ -1142,23 +1385,31 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		var token string
+		
+		// 优先从 Authorization header 获取
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "缺少Authorization头"})
-			c.Abort()
-			return
+		if authHeader != "" {
+			// 检查Bearer token格式
+			tokenParts := strings.Split(authHeader, " ")
+			if len(tokenParts) == 2 && tokenParts[0] == "Bearer" {
+				token = tokenParts[1]
+			}
+		}
+		
+		// 如果 header 中没有，尝试从 query 参数获取（用于 SSE/EventSource）
+		if token == "" {
+			token = c.Query("token")
 		}
 
-		// 检查Bearer token格式
-		tokenParts := strings.Split(authHeader, " ")
-		if len(tokenParts) != 2 || tokenParts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "无效的Authorization格式"})
+		if token == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "缺少Authorization头或token参数"})
 			c.Abort()
 			return
 		}
 
 		// 验证JWT token
-		claims, err := auth.ValidateJWT(tokenParts[1])
+		claims, err := auth.ValidateJWT(token)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "无效的token: " + err.Error()})
 			c.Abort()
@@ -1464,4 +1715,854 @@ func (s *Server) handleGetPromptTemplate(c *gin.Context) {
 		"name":    template.Name,
 		"content": template.Content,
 	})
+}
+
+// handleKlines 获取K线数据
+func (s *Server) handleKlines(c *gin.Context) {
+	// 获取参数
+	symbol := c.Query("symbol")
+	interval := c.Query("interval")
+	limitStr := c.Query("limit")
+
+	// 参数验证
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol参数必填"})
+		return
+	}
+
+	// 默认值
+	if interval == "" {
+		interval = "4h"
+	}
+
+	limit := 100
+	if limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	// 调用 market 包获取K线数据
+	klines, err := market.GetKlines(symbol, interval, limit)
+	if err != nil {
+		log.Printf("获取K线数据失败: symbol=%s interval=%s limit=%d error=%v", symbol, interval, limit, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取K线数据失败: %v", err)})
+		return
+	}
+
+	// 计算技术指标
+	ema20Values := make([]float64, len(klines))
+	ema50Values := make([]float64, len(klines))
+	ema200Values := make([]float64, len(klines))
+	macdValues := make([]float64, len(klines))
+	rsiValues := make([]float64, len(klines))
+	bollingerUpper := make([]float64, len(klines))
+	bollingerMiddle := make([]float64, len(klines))
+	bollingerLower := make([]float64, len(klines))
+
+	// 逐个K线计算指标（只要有足够数据就计算）
+	for i := range klines {
+		if i < 19 {
+			// 数据不足，填充0或null
+			ema20Values[i] = 0
+			ema50Values[i] = 0
+			ema200Values[i] = 0
+			macdValues[i] = 0
+			rsiValues[i] = 0
+			bollingerUpper[i] = 0
+			bollingerMiddle[i] = 0
+			bollingerLower[i] = 0
+			continue
+		}
+
+		// 取到当前位置的切片来计算
+		sliceForCalc := klines[:i+1]
+
+		// EMA20
+		if i >= 19 {
+			ema20Values[i] = market.CalculateEMA(sliceForCalc, 20)
+		}
+
+		// EMA50
+		if i >= 49 {
+			ema50Values[i] = market.CalculateEMA(sliceForCalc, 50)
+		} else {
+			ema50Values[i] = 0
+		}
+
+		// EMA200
+		if i >= 199 {
+			ema200Values[i] = market.CalculateEMA(sliceForCalc, 200)
+		} else {
+			ema200Values[i] = 0
+		}
+
+		// MACD
+		if i >= 25 {
+			macdValues[i] = market.CalculateMACD(sliceForCalc)
+		}
+
+		// RSI
+		if i >= 13 {
+			rsiValues[i] = market.CalculateRSI(sliceForCalc, 14)
+		}
+
+		// 布林带
+		if i >= 19 {
+			bb := market.CalculateBollinger(sliceForCalc, 20, 2.0)
+			if bb != nil {
+				bollingerUpper[i] = bb.Upper
+				bollingerMiddle[i] = bb.Middle
+				bollingerLower[i] = bb.Lower
+			}
+		}
+	}
+
+	// 转换为前端需要的格式（包含指标）
+	type KlineResponse struct {
+		Time            int64   `json:"time"` // Unix时间戳（秒）
+		Open            float64 `json:"open"`
+		High            float64 `json:"high"`
+		Low             float64 `json:"low"`
+		Close           float64 `json:"close"`
+		Volume          float64 `json:"volume"`
+		EMA20           float64 `json:"ema20,omitempty"`
+		EMA50           float64 `json:"ema50,omitempty"`
+		EMA200          float64 `json:"ema200,omitempty"`
+		MACD            float64 `json:"macd,omitempty"`
+		RSI             float64 `json:"rsi,omitempty"`
+		BollingerUpper  float64 `json:"bb_upper,omitempty"`
+		BollingerMiddle float64 `json:"bb_middle,omitempty"`
+		BollingerLower  float64 `json:"bb_lower,omitempty"`
+	}
+
+	response := make([]KlineResponse, len(klines))
+	for i, k := range klines {
+		response[i] = KlineResponse{
+			Time:            k.OpenTime / 1000, // 转换为秒
+			Open:            k.Open,
+			High:            k.High,
+			Low:             k.Low,
+			Close:           k.Close,
+			Volume:          k.Volume,
+			EMA20:           ema20Values[i],
+			EMA50:           ema50Values[i],
+			EMA200:          ema200Values[i],
+			MACD:            macdValues[i],
+			RSI:             rsiValues[i],
+			BollingerUpper:  bollingerUpper[i],
+			BollingerMiddle: bollingerMiddle[i],
+			BollingerLower:  bollingerLower[i],
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":   symbol,
+		"interval": interval,
+		"klines":   response,
+	})
+}
+
+// handleCycleCheck 返回最近N个决策周期（用于cycle check视图）
+func (s *Server) handleCycleCheck(c *gin.Context) {
+	traderMgr, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	traderInstance, err := traderMgr.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("获取trader失败: %v", err)})
+		return
+	}
+
+	limit := parseLimit(c.Query("limit"), 15)
+
+	records, err := traderInstance.GetDecisionLogger().GetLatestRecords(limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取决策记录失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id": traderID,
+		"limit":     limit,
+		"records":   records,
+	})
+}
+
+// handleListCloseReviews 返回某个trader的close review摘要列表
+func (s *Server) handleListCloseReviews(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	limit := parseLimit(c.Query("limit"), 50)
+
+	reviews, err := s.database.ListCloseReviews(traderID, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("查询close review失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id": traderID,
+		"items":     reviews,
+	})
+}
+
+// handleGetCloseReview 返回某个trade的close review详情
+func (s *Server) handleGetCloseReview(c *gin.Context) {
+	tradeID := c.Param("trade_id")
+	if tradeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trade_id不能为空"})
+		return
+	}
+
+	summary, err := s.database.GetCloseReview(tradeID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "未找到对应的close review"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("查询close review失败: %v", err)})
+		return
+	}
+
+	var detail *review.CloseReviewFile
+	if summary != nil && summary.FilePath != "" {
+		payload, loadErr := review.LoadCloseReview(summary.FilePath)
+		if loadErr != nil {
+			log.Printf("⚠️ 读取close review文件失败 %s: %v", summary.FilePath, loadErr)
+		} else {
+			detail = payload
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"summary": summary,
+		"detail":  detail,
+	})
+}
+
+// handleCreateCloseReview 保存一条close review记录
+func (s *Server) handleCreateCloseReview(c *gin.Context) {
+	traderMgr, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 确认trader存在（用于权限校验）
+	if _, err := traderMgr.GetTrader(traderID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("获取trader失败: %v", err)})
+		return
+	}
+
+	tradeID := c.Param("trade_id")
+	if tradeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trade_id不能为空"})
+		return
+	}
+
+	var payload review.CloseReviewFile
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体解析失败: %v", err)})
+		return
+	}
+
+	if payload.TradeSnapshot.TradeID == "" {
+		payload.TradeSnapshot.TradeID = tradeID
+	}
+
+	if payload.TradeSnapshot.TradeID != tradeID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trade_id 与 payload 不一致"})
+		return
+	}
+
+	// 确保review段落包含trade标识
+	payload.Review.TradeID = payload.TradeSnapshot.TradeID
+	if payload.Review.Symbol == "" {
+		payload.Review.Symbol = payload.TradeSnapshot.Symbol
+	}
+	if payload.Review.Side == "" {
+		payload.Review.Side = payload.TradeSnapshot.Side
+	}
+
+	filePath, err := review.SaveCloseReview(review.DefaultBaseDir, traderID, &payload)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("保存Close Review失败: %v", err)})
+		return
+	}
+
+	summary := &config.CloseReviewSummary{
+		TradeID:                   payload.TradeSnapshot.TradeID,
+		TraderID:                  traderID,
+		Symbol:                    payload.TradeSnapshot.Symbol,
+		Side:                      payload.TradeSnapshot.Side,
+		PnL:                       payload.TradeSnapshot.PnL,
+		PnLPct:                    payload.TradeSnapshot.PnLPct,
+		HoldingMinutes:            payload.TradeSnapshot.HoldingMinutes,
+		RiskScore:                 payload.Review.RiskScore,
+		ExecutionScore:            payload.Review.ExecutionScore,
+		SignalScore:               payload.Review.SignalScore,
+		Summary:                   payload.Review.Summary,
+		WhatWentWell:              payload.Review.WhatWentWell,
+		Improvements:              payload.Review.Improvements,
+		RootCause:                 payload.Review.RootCause,
+		ExtremeInterventionReview: payload.Review.ExtremeInterventionReview,
+		ActionItems:               payload.Review.ActionItems,
+		Confidence:                payload.Review.Confidence,
+		Reasoning:                 payload.Review.Reasoning,
+		FilePath:                  filePath,
+		CreatedAt:                 payload.Timestamp,
+	}
+
+	if err := s.database.UpsertCloseReview(summary); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("写入数据库失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"summary": summary,
+	})
+}
+
+func parseLimit(raw string, defaultVal int) int {
+	if raw == "" {
+		return defaultVal
+	}
+
+	val, err := strconv.Atoi(raw)
+	if err != nil || val <= 0 {
+		return defaultVal
+	}
+	return val
+}
+
+// handleReviewLossTrades 批量复盘亏损订单
+func (s *Server) handleReviewLossTrades(c *gin.Context) {
+	traderMgr, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := traderMgr.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("获取trader失败: %v", err)})
+		return
+	}
+
+	// 获取参数
+	limit := parseLimit(c.Query("limit"), 100) // 默认分析最近100个周期的记录
+	force := c.Query("force") == "true"        // 是否强制重新复盘已有复盘的交易
+
+	// 获取决策日志记录器
+	decisionLogger := trader.GetDecisionLogger()
+	if decisionLogger == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法获取决策日志记录器"})
+		return
+	}
+
+	// 提取亏损交易
+	lossTrades, err := review.ExtractLossTrades(decisionLogger, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("提取亏损交易失败: %v", err)})
+		return
+	}
+
+	if len(lossTrades) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message":     "未找到亏损交易",
+			"reviewed":    0,
+			"failed":      0,
+			"skipped":     0,
+			"total_found": 0,
+		})
+		return
+	}
+
+	// 获取trader的MCP客户端（用于调用AI）
+	// 这里需要从trader获取AI客户端，但trader接口可能没有暴露
+	// 我们需要通过其他方式获取，或者创建一个新的客户端
+	// 暂时先返回错误，提示需要配置
+	mcpClient := mcp.New()
+	// TODO: 从trader配置中获取AI模型配置并设置到mcpClient
+	// 这里需要根据实际情况调整
+
+	// 创建复盘生成器
+	reviewGen := review.NewReviewGenerator(mcpClient)
+
+	// 批量生成复盘
+	reviewed := 0
+	failed := 0
+	skipped := 0
+	var errors []string
+
+	for _, trade := range lossTrades {
+		// 检查是否已有复盘
+		if !force {
+			existing, err := s.database.GetCloseReview(trade.TradeID)
+			if err == nil && existing != nil {
+				skipped++
+				continue
+			}
+		}
+
+		// 生成复盘
+		reviewFile, err := reviewGen.GenerateReview(trade, decisionLogger)
+		if err != nil {
+			failed++
+			errors = append(errors, fmt.Sprintf("%s: %v", trade.TradeID, err))
+			log.Printf("❌ 生成复盘失败 %s: %v", trade.TradeID, err)
+			continue
+		}
+
+		// 保存复盘
+		filePath, err := review.SaveCloseReview(review.DefaultBaseDir, traderID, reviewFile)
+		if err != nil {
+			failed++
+			errors = append(errors, fmt.Sprintf("%s: 保存失败 %v", trade.TradeID, err))
+			log.Printf("❌ 保存复盘失败 %s: %v", trade.TradeID, err)
+			continue
+		}
+
+		// 保存到数据库
+		summary := &config.CloseReviewSummary{
+			TradeID:                   reviewFile.TradeSnapshot.TradeID,
+			TraderID:                  traderID,
+			Symbol:                    reviewFile.TradeSnapshot.Symbol,
+			Side:                      reviewFile.TradeSnapshot.Side,
+			PnL:                       reviewFile.TradeSnapshot.PnL,
+			PnLPct:                    reviewFile.TradeSnapshot.PnLPct,
+			HoldingMinutes:            reviewFile.TradeSnapshot.HoldingMinutes,
+			RiskScore:                 reviewFile.Review.RiskScore,
+			ExecutionScore:            reviewFile.Review.ExecutionScore,
+			SignalScore:               reviewFile.Review.SignalScore,
+			Summary:                   reviewFile.Review.Summary,
+			WhatWentWell:              reviewFile.Review.WhatWentWell,
+			Improvements:              reviewFile.Review.Improvements,
+			RootCause:                 reviewFile.Review.RootCause,
+			ExtremeInterventionReview: reviewFile.Review.ExtremeInterventionReview,
+			ActionItems:               reviewFile.Review.ActionItems,
+			Confidence:                reviewFile.Review.Confidence,
+			Reasoning:                 reviewFile.Review.Reasoning,
+			FilePath:                  filePath,
+			CreatedAt:                 reviewFile.Timestamp,
+		}
+
+		if err := s.database.UpsertCloseReview(summary); err != nil {
+			failed++
+			errors = append(errors, fmt.Sprintf("%s: 写入数据库失败 %v", trade.TradeID, err))
+			log.Printf("❌ 写入数据库失败 %s: %v", trade.TradeID, err)
+			continue
+		}
+
+		reviewed++
+		log.Printf("✓ 成功生成并保存复盘: %s", trade.TradeID)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":     fmt.Sprintf("批量复盘完成: 成功 %d, 失败 %d, 跳过 %d", reviewed, failed, skipped),
+		"reviewed":    reviewed,
+		"failed":      failed,
+		"skipped":     skipped,
+		"total_found": len(lossTrades),
+		"errors":      errors,
+	})
+}
+
+// handleReviewSingleTrade 为单个交易生成复盘
+func (s *Server) handleReviewSingleTrade(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderMgr, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	tradeID := c.Param("trade_id")
+	if tradeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trade_id不能为空"})
+		return
+	}
+
+	// 尝试从TraderManager获取交易员（如果正在运行）
+	var decisionLogger *logger.DecisionLogger
+	trader, err := traderMgr.GetTrader(traderID)
+	if err == nil && trader != nil {
+		// 交易员正在运行，使用其决策日志记录器
+		decisionLogger = trader.GetDecisionLogger()
+		if decisionLogger == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "无法获取决策日志记录器"})
+			return
+		}
+	} else {
+		// 交易员未运行，直接从文件系统创建决策日志记录器
+		logDir := fmt.Sprintf("decision_logs/%s", traderID)
+		decisionLogger = logger.NewDecisionLogger(logDir)
+		log.Printf("ℹ️  交易员 %s 未运行，从文件系统读取决策日志: %s", traderID, logDir)
+	}
+
+	// 从数据库获取trader配置（包含AI模型配置）
+	_, aiModelCfg, _, err := s.database.GetTraderConfig(userID, traderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取trader配置失败: %v", err)})
+		return
+	}
+
+	// 创建并配置MCP客户端
+	mcpClient := mcp.New()
+	if aiModelCfg.Provider == "qwen" {
+		mcpClient.SetQwenAPIKey(aiModelCfg.APIKey, aiModelCfg.CustomAPIURL, aiModelCfg.CustomModelName)
+	} else if aiModelCfg.Provider == "deepseek" {
+		mcpClient.SetDeepSeekAPIKey(aiModelCfg.APIKey, aiModelCfg.CustomAPIURL, aiModelCfg.CustomModelName)
+	} else if aiModelCfg.Provider == "custom" {
+		mcpClient.SetCustomAPI(aiModelCfg.CustomAPIURL, aiModelCfg.APIKey, aiModelCfg.CustomModelName)
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持的AI模型: %s", aiModelCfg.Provider)})
+		return
+	}
+
+	// 创建复盘生成器
+	reviewGen := review.NewReviewGenerator(mcpClient)
+
+	// 首先尝试从亏损交易列表中查找（更快）
+	lossTrades, err := review.ExtractLossTrades(decisionLogger, 1000)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("提取亏损交易失败: %v", err)})
+		return
+	}
+
+	// 查找指定的交易
+	var targetTrade *review.TradeInfo
+	for i := range lossTrades {
+		if lossTrades[i].TradeID == tradeID {
+			targetTrade = &lossTrades[i]
+			break
+		}
+	}
+
+	// 如果从亏损交易列表中找不到，尝试直接从决策日志中查找（不限制是否亏损）
+	if targetTrade == nil {
+		log.Printf("ℹ️  从亏损交易列表中未找到 %s，尝试直接从决策日志中查找", tradeID)
+		// 增加查找的记录数量，确保能找到
+		foundTrade, findErr := review.FindTradeByID(decisionLogger, tradeID, 5000)
+		if findErr != nil {
+			log.Printf("❌ 查找交易失败: %v", findErr)
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("未找到交易 %s: %v", tradeID, findErr)})
+			return
+		}
+		targetTrade = foundTrade
+		log.Printf("✓ 从决策日志中找到了交易 %s", tradeID)
+	}
+
+	// 检查是否已有复盘
+	force := c.Query("force") == "true"
+	if !force {
+		existing, err := s.database.GetCloseReview(tradeID)
+		if err == nil && existing != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"message": "该交易已有复盘，使用force=true可强制重新生成",
+				"summary": existing,
+			})
+			return
+		}
+	}
+
+	// 生成复盘
+	reviewFile, err := reviewGen.GenerateReview(*targetTrade, decisionLogger)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("生成复盘失败: %v", err)})
+		return
+	}
+
+	// 保存复盘
+	filePath, err := review.SaveCloseReview(review.DefaultBaseDir, traderID, reviewFile)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("保存复盘失败: %v", err)})
+		return
+	}
+
+	// 保存到数据库
+	summary := &config.CloseReviewSummary{
+		TradeID:                   reviewFile.TradeSnapshot.TradeID,
+		TraderID:                  traderID,
+		Symbol:                    reviewFile.TradeSnapshot.Symbol,
+		Side:                      reviewFile.TradeSnapshot.Side,
+		PnL:                       reviewFile.TradeSnapshot.PnL,
+		PnLPct:                    reviewFile.TradeSnapshot.PnLPct,
+		HoldingMinutes:            reviewFile.TradeSnapshot.HoldingMinutes,
+		RiskScore:                 reviewFile.Review.RiskScore,
+		ExecutionScore:            reviewFile.Review.ExecutionScore,
+		SignalScore:               reviewFile.Review.SignalScore,
+		Summary:                   reviewFile.Review.Summary,
+		WhatWentWell:              reviewFile.Review.WhatWentWell,
+		Improvements:              reviewFile.Review.Improvements,
+		RootCause:                 reviewFile.Review.RootCause,
+		ExtremeInterventionReview: reviewFile.Review.ExtremeInterventionReview,
+		ActionItems:               reviewFile.Review.ActionItems,
+		Confidence:                reviewFile.Review.Confidence,
+		Reasoning:                 reviewFile.Review.Reasoning,
+		FilePath:                  filePath,
+		CreatedAt:                 reviewFile.Timestamp,
+	}
+
+	if err := s.database.UpsertCloseReview(summary); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("写入数据库失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "复盘生成成功",
+		"summary":   summary,
+		"file_path": filePath,
+	})
+}
+
+// handleAIStream SSE 流式推送 AI 思考过程
+func (s *Server) handleAIStream(c *gin.Context) {
+	// 认证已在中间件中处理
+	traderID := c.Query("trader_id")
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 参数必填"})
+		return
+	}
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+
+	// 创建 channel 用于推送数据
+	ch := make(chan string, 100)
+	s.streamMutex.Lock()
+	s.streamChannels[traderID] = ch
+	s.streamMutex.Unlock()
+
+	// 注册流式回调到 decision 包
+	streamCallback := func(chunk string) error {
+		// 推送数据到 channel
+		select {
+		case ch <- chunk:
+		default:
+			// channel 已满，跳过
+		}
+		return nil
+	}
+	decision.RegisterStreamCallback(traderID, streamCallback)
+
+	// 清理函数：客户端断开时移除 channel 和回调
+	defer func() {
+		s.streamMutex.Lock()
+		delete(s.streamChannels, traderID)
+		close(ch)
+		s.streamMutex.Unlock()
+		decision.UnregisterStreamCallback(traderID)
+	}()
+
+	// 发送初始连接消息（使用默认事件，前端 onmessage 可以接收）
+	c.SSEvent("", gin.H{
+		"type":    "connected",
+		"message": "已连接到 AI 思考流，等待下一次决策...",
+	})
+	c.Writer.Flush()
+
+	// 监听 channel 并推送数据
+	for {
+		select {
+		case data, ok := <-ch:
+			if !ok {
+				// channel 已关闭
+				c.SSEvent("", gin.H{
+					"type":    "closed",
+					"message": "连接已关闭",
+				})
+				c.Writer.Flush()
+				return
+			}
+			// 推送数据（使用默认事件）
+			c.SSEvent("", gin.H{
+				"type": "partial_cot",
+				"data": data,
+			})
+			c.Writer.Flush()
+
+		case <-c.Request.Context().Done():
+			// 客户端断开连接
+			return
+
+		case <-time.After(30 * time.Second):
+			// 发送心跳保持连接
+			c.SSEvent("", gin.H{
+				"type": "heartbeat",
+			})
+			c.Writer.Flush()
+		}
+	}
+}
+
+// pushToStream 推送数据到指定 trader 的流
+func (s *Server) pushToStream(traderID string, data string) {
+	s.streamMutex.RLock()
+	ch, exists := s.streamChannels[traderID]
+	s.streamMutex.RUnlock()
+
+	if exists {
+		select {
+		case ch <- data:
+		default:
+			// channel 已满，跳过
+		}
+	}
+}
+
+// handleAIDecisionStream 手动触发一次决策并流式返回
+func (s *Server) handleAIDecisionStream(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 设置 SSE 响应头
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+
+	// 发送初始消息
+	c.SSEvent("message", gin.H{
+		"type":    "start",
+		"message": "开始 AI 决策分析...",
+	})
+	c.Writer.Flush()
+
+	// 获取 trader 的上下文信息（需要从 trader 获取）
+	// 这里需要调用 trader 的方法来构建决策上下文
+	// 由于 trader 接口可能没有直接暴露构建上下文的方法，我们需要通过反射或添加新方法
+	// 为了简化，我们先尝试获取账户和持仓信息来构建上下文
+
+	account, err := trader.GetAccountInfo()
+	if err != nil {
+		c.SSEvent("message", gin.H{
+			"type":    "error",
+			"message": fmt.Sprintf("获取账户信息失败: %v", err),
+		})
+		c.Writer.Flush()
+		return
+	}
+
+	positions, err := trader.GetPositions()
+	if err != nil {
+		c.SSEvent("message", gin.H{
+			"type":    "error",
+			"message": fmt.Sprintf("获取持仓信息失败: %v", err),
+		})
+		c.Writer.Flush()
+		return
+	}
+
+	// 构建决策上下文（简化版，实际需要更多信息）
+	ctx := &decision.Context{
+		CurrentTime:    time.Now().Format("2006-01-02 15:04:05"),
+		RuntimeMinutes: 0, // 需要从 trader 获取
+		CallCount:      0, // 需要从 trader 获取
+		Account: decision.AccountInfo{
+			TotalEquity:      account["total_equity"].(float64),
+			AvailableBalance: account["available_balance"].(float64),
+			TotalPnL:         account["total_pnl"].(float64),
+			TotalPnLPct:      account["total_pnl_pct"].(float64),
+			MarginUsed:       account["margin_used"].(float64),
+			MarginUsedPct:    account["margin_used_pct"].(float64),
+			PositionCount:    int(account["position_count"].(float64)),
+		},
+		Positions:     make([]decision.PositionInfo, 0),
+		PendingOrders: make([]decision.PendingOrderInfo, 0),
+		CandidateCoins: make([]decision.CandidateCoin, 0),
+	}
+
+	// 转换持仓信息
+	for _, pos := range positions {
+		ctx.Positions = append(ctx.Positions, decision.PositionInfo{
+			Symbol:           pos["symbol"].(string),
+			Side:             pos["side"].(string),
+			EntryPrice:       pos["entry_price"].(float64),
+			MarkPrice:        pos["mark_price"].(float64),
+			Quantity:         pos["quantity"].(float64),
+			Leverage:         int(pos["leverage"].(float64)),
+			UnrealizedPnL:    pos["unrealized_pnl"].(float64),
+			UnrealizedPnLPct: pos["unrealized_pnl_pct"].(float64),
+			LiquidationPrice: pos["liquidation_price"].(float64),
+			MarginUsed:       pos["margin_used"].(float64),
+		})
+	}
+
+	// 获取 MCP 客户端（需要从 trader 获取）
+	// 这里假设 trader 有 GetMCPClient 方法，如果没有需要添加
+	// 为了简化，我们先使用流式回调来推送内容
+
+	// 创建流式回调
+	var fullResponse strings.Builder
+	_ = func(chunk string) error {
+		fullResponse.WriteString(chunk)
+		// 推送增量内容
+		c.SSEvent("message", gin.H{
+			"type": "partial_cot",
+			"data": chunk,
+		})
+		c.Writer.Flush()
+		return nil
+	}
+
+	// 获取 trader 的 MCP 客户端（需要添加方法或通过接口获取）
+	// 这里先注释，需要根据实际 trader 接口实现
+	/*
+	mcpClient := trader.GetMCPClient()
+	if mcpClient == nil {
+		c.SSEvent("message", gin.H{
+			"type":    "error",
+			"message": "无法获取 AI 客户端",
+		})
+		c.Writer.Flush()
+		return
+	}
+
+	// 调用流式决策
+	decisionResult, err := decision.GetFullDecisionStream(ctx, mcpClient, "", false, "", streamCallback)
+	if err != nil {
+		c.SSEvent("message", gin.H{
+			"type":    "error",
+			"message": fmt.Sprintf("决策失败: %v", err),
+		})
+		c.Writer.Flush()
+		return
+	}
+
+	// 发送最终决策
+	c.SSEvent("message", gin.H{
+		"type":     "final_decision",
+		"decision":  decisionResult,
+		"cot_trace": decisionResult.CoTTrace,
+	})
+	c.Writer.Flush()
+	*/
+
+	// 临时实现：发送提示信息
+	c.SSEvent("message", gin.H{
+		"type":    "info",
+		"message": "流式决策功能需要 trader 接口支持 GetMCPClient 方法",
+	})
+	c.Writer.Flush()
 }

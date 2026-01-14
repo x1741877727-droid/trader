@@ -48,6 +48,9 @@ type Trader interface {
 	// GetOpenOrders 获取该币种的所有挂单
 	GetOpenOrders(symbol string) ([]map[string]interface{}, error)
 
+	// GetOrderStatus 查询订单状态
+	GetOrderStatus(symbol string, orderID int64) (map[string]interface{}, error)
+
 	// CancelOrder 取消指定订单
 	CancelOrder(symbol string, orderID int64) error
 
