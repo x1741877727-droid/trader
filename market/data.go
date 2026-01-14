@@ -32,17 +32,17 @@ type ExecutionGateConfig struct {
 
 // executionGateConfig 包级别的执行门禁配置（需要在程序启动时设置）
 var executionGateConfig = ExecutionGateConfig{
-	MaxSpreadBpsLimitOnly:             25.0,    // 0.25% - SpreadBps >= 此值时 limit_only
-	MaxSpreadBpsNoTrade:               40.0,    // 0.4% - SpreadBps >= 此值时 no_trade
-	MaxDepthRatioAbs:                  3.0,     // DepthRatio > 此值时 limit_only
-	MinDepthRatioAbs:                  0.33,    // DepthRatio < 此值时 limit_only
-	MaxSpreadBpsLimitPreferred:        15.0,    // 0.15%
-	MinBestNotionalUsdtLimitOnly:      10000.0, // 10K USDT - best level备用阈值
-	MinBestNotionalUsdtLimitPreferred: 50000.0, // 50K USDT - best level备用阈值
+	MaxSpreadBpsLimitOnly:             25.0,     // 0.25% - SpreadBps >= 此值时 limit_only
+	MaxSpreadBpsNoTrade:               40.0,     // 0.4% - SpreadBps >= 此值时 no_trade
+	MaxDepthRatioAbs:                  3.0,      // DepthRatio > 此值时 limit_only
+	MinDepthRatioAbs:                  0.33,     // DepthRatio < 此值时 limit_only
+	MaxSpreadBpsLimitPreferred:        15.0,     // 0.15%
+	MinBestNotionalUsdtLimitOnly:      10000.0,  // 10K USDT - best level备用阈值
+	MinBestNotionalUsdtLimitPreferred: 50000.0,  // 50K USDT - best level备用阈值
 	MinDepthNotional10LimitOnly:       200000.0, // 200K USDT - 前10档累计，极差市场强制限价
 	MinDepthNotional10LimitPreferred:  500000.0, // 500K USDT - 前10档累计，一般差市场建议限价
-	NotionalMultiplierLimitOnly:       8.0,     // 计划notional > 8×effective_notional 时 limit_only
-	NotionalMultiplierNoTrade:         15.0,    // 计划notional > 15×effective_notional 时 no_trade
+	NotionalMultiplierLimitOnly:       8.0,      // 计划notional > 8×effective_notional 时 limit_only
+	NotionalMultiplierNoTrade:         15.0,     // 计划notional > 15×effective_notional 时 no_trade
 	DefaultModeOnMissing:              "limit_only",
 }
 
