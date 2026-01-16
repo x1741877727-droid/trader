@@ -374,37 +374,37 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 	// 获取更多历史记录来构建完整的持仓状态（使用更大的窗口）
 	// 如果 lookbackCycles = 0（获取全部记录），则不需要再获取 allRecords
 	if lookbackCycles > 0 {
-		allRecords, err := l.GetLatestRecords(lookbackCycles * 3) // 扩大3倍窗口
-		if err == nil && len(allRecords) > len(records) {
-			// 先从扩大的窗口中收集所有开仓记录
-			for _, record := range allRecords {
-				for _, action := range record.Decisions {
-					if !action.Success {
-						continue
-					}
+	allRecords, err := l.GetLatestRecords(lookbackCycles * 3) // 扩大3倍窗口
+	if err == nil && len(allRecords) > len(records) {
+		// 先从扩大的窗口中收集所有开仓记录
+		for _, record := range allRecords {
+			for _, action := range record.Decisions {
+				if !action.Success {
+					continue
+				}
 
-					symbol := action.Symbol
-					side := ""
-					if action.Action == "open_long" || action.Action == "close_long" {
-						side = "long"
-					} else if action.Action == "open_short" || action.Action == "close_short" {
-						side = "short"
-					}
-					posKey := symbol + "_" + side
+				symbol := action.Symbol
+				side := ""
+				if action.Action == "open_long" || action.Action == "close_long" {
+					side = "long"
+				} else if action.Action == "open_short" || action.Action == "close_short" {
+					side = "short"
+				}
+				posKey := symbol + "_" + side
 
-					switch action.Action {
-					case "open_long", "open_short":
-						// 记录开仓（使用更精确的key，包含时间戳避免冲突）
-						openPositions[posKey] = map[string]interface{}{
-							"side":      side,
-							"openPrice": action.Price,
-							"openTime":  action.Timestamp,
-							"quantity":  action.Quantity,
-							"leverage":  action.Leverage,
-						}
-					case "close_long", "close_short":
-						// 移除已平仓记录
-						delete(openPositions, posKey)
+				switch action.Action {
+				case "open_long", "open_short":
+					// 记录开仓（使用更精确的key，包含时间戳避免冲突）
+					openPositions[posKey] = map[string]interface{}{
+						"side":      side,
+						"openPrice": action.Price,
+						"openTime":  action.Timestamp,
+						"quantity":  action.Quantity,
+						"leverage":  action.Leverage,
+					}
+				case "close_long", "close_short":
+					// 移除已平仓记录
+					delete(openPositions, posKey)
 					}
 				}
 			}
@@ -468,7 +468,7 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 					// 计算持仓时长
 					duration := action.Timestamp.Sub(openTime)
-
+					
 					// 记录交易结果
 					outcome := TradeOutcome{
 						TradeID:       fmt.Sprintf("%s_%d_%d", symbol, openTime.Unix(), action.Timestamp.Unix()),
@@ -487,7 +487,7 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						CloseTime:     action.Timestamp,
 						WasStopLoss:   action.WasStopLoss,
 					}
-
+					
 					// 调试日志：检测异常长的持仓时间
 					if duration.Hours() > 24 {
 						fmt.Printf("⚠️ 检测到异常长的持仓时间: %s %s, 持仓时长: %v (开仓: %v, 平仓: %v)\n",

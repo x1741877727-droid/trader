@@ -265,9 +265,9 @@ func NewAutoTrader(config AutoTraderConfig, globalConfig *config.Config) (*AutoT
 		trader = NewPaperTrader()
 	} else {
 		// 真实交易模式
-		switch config.Exchange {
-		case "binance":
-			log.Printf("🏦 [%s] 使用币安合约交易", config.Name)
+	switch config.Exchange {
+	case "binance":
+		log.Printf("🏦 [%s] 使用币安合约交易", config.Name)
 			// 使用配置的止损工作类型，默认MARK_PRICE更抗插针
 			stopLossWorkingType := config.StopLossWorkingType
 			if stopLossWorkingType == "" {
@@ -275,20 +275,20 @@ func NewAutoTrader(config AutoTraderConfig, globalConfig *config.Config) (*AutoT
 			}
 			trader = NewFuturesTraderWithConfig(config.BinanceAPIKey, config.BinanceSecretKey,
 				stopLossWorkingType, config.EnablePriceProtect)
-		case "hyperliquid":
-			log.Printf("🏦 [%s] 使用Hyperliquid交易", config.Name)
-			trader, err = NewHyperliquidTrader(config.HyperliquidPrivateKey, config.HyperliquidWalletAddr, config.HyperliquidTestnet)
-			if err != nil {
-				return nil, fmt.Errorf("初始化Hyperliquid交易器失败: %w", err)
-			}
-		case "aster":
-			log.Printf("🏦 [%s] 使用Aster交易", config.Name)
-			trader, err = NewAsterTrader(config.AsterUser, config.AsterSigner, config.AsterPrivateKey)
-			if err != nil {
-				return nil, fmt.Errorf("初始化Aster交易器失败: %w", err)
-			}
-		default:
-			return nil, fmt.Errorf("不支持的交易平台: %s", config.Exchange)
+	case "hyperliquid":
+		log.Printf("🏦 [%s] 使用Hyperliquid交易", config.Name)
+		trader, err = NewHyperliquidTrader(config.HyperliquidPrivateKey, config.HyperliquidWalletAddr, config.HyperliquidTestnet)
+		if err != nil {
+			return nil, fmt.Errorf("初始化Hyperliquid交易器失败: %w", err)
+		}
+	case "aster":
+		log.Printf("🏦 [%s] 使用Aster交易", config.Name)
+		trader, err = NewAsterTrader(config.AsterUser, config.AsterSigner, config.AsterPrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("初始化Aster交易器失败: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("不支持的交易平台: %s", config.Exchange)
 		}
 	}
 
@@ -589,16 +589,16 @@ func (at *AutoTrader) runCycle() error {
 		// 5. 调用AI获取完整决策（只对允许的symbols）
 		log.Printf("🤖 正在请求AI分析并决策... [模板: %s] [允许交易: %v]", at.systemPromptTemplate, allowedSymbols)
 
-		// 动态拼接当前持仓的TP1/TP2/TP3到本轮自定义prompt里
-		dynamicPrompt := at.buildDynamicPrompt(ctx)
-		finalPrompt := at.customPrompt
-		if dynamicPrompt != "" {
-			if finalPrompt != "" {
-				finalPrompt = finalPrompt + "\n\n" + dynamicPrompt
-			} else {
-				finalPrompt = dynamicPrompt
-			}
+	// 动态拼接当前持仓的TP1/TP2/TP3到本轮自定义prompt里
+	dynamicPrompt := at.buildDynamicPrompt(ctx)
+	finalPrompt := at.customPrompt
+	if dynamicPrompt != "" {
+		if finalPrompt != "" {
+			finalPrompt = finalPrompt + "\n\n" + dynamicPrompt
+		} else {
+			finalPrompt = dynamicPrompt
 		}
+	}
 
 		decisionResp, err = decision.GetFullDecisionWithCustomPromptAndTraderID(ctx, at.mcpClient, finalPrompt, at.overrideBasePrompt, at.systemPromptTemplate, at.id, at.globalConfig)
 
@@ -616,12 +616,12 @@ func (at *AutoTrader) runCycle() error {
 		record.SystemPrompt = decisionResp.SystemPrompt // 保存系统提示词
 		record.InputPrompt = decisionResp.UserPrompt
 		record.CoTTrace = decisionResp.CoTTrace
-
+		
 		// 保存当前思维链供下一周期参考
 		if decisionResp.CoTTrace != "" {
 			at.lastCoTTrace = decisionResp.CoTTrace
 		}
-
+		
 		if len(decisionResp.Decisions) > 0 {
 			decisionJSON, _ := json.MarshalIndent(decisionResp.Decisions, "", "  ")
 			record.DecisionJSON = string(decisionJSON)
@@ -653,11 +653,11 @@ func (at *AutoTrader) runCycle() error {
 				log.Printf("⚠️ AI决策被风控拦截: %s", decisionErr.Message)
 			} else {
 				// 其他DecisionError类型仍按error处理
-				record.Success = false
+		record.Success = false
 				record.Status = "error"
 				record.ErrorType = string(decisionErr.Type)
 				record.ErrorSeverity = "error"
-				record.ErrorMessage = fmt.Sprintf("获取AI决策失败: %v", err)
+		record.ErrorMessage = fmt.Sprintf("获取AI决策失败: %v", err)
 			}
 		} else {
 			// 普通错误
@@ -694,7 +694,7 @@ func (at *AutoTrader) runCycle() error {
 		if record.Status == "warning" && record.ErrorType == "DECISION_VALIDATION_REJECTED" {
 			log.Printf("✅ 继续执行流程（AI分析成功，仅决策被风控拦截）")
 		} else {
-			return fmt.Errorf("获取AI决策失败: %w", err)
+		return fmt.Errorf("获取AI决策失败: %w", err)
 		}
 	}
 
@@ -786,7 +786,7 @@ func (at *AutoTrader) syncPendingOrders() error {
 				side, _ := pos["side"].(string)
 				if symbol == pendingOrder.Symbol && strings.ToLower(side) == pendingOrder.Side {
 					hasPosition = true
-
+					
 					// 获取持仓数量
 					qty, _ := pos["positionAmt"].(float64)
 					if qty < 0 {
@@ -796,7 +796,7 @@ func (at *AutoTrader) syncPendingOrders() error {
 					// 限价单成交后，自动设置止盈止损
 					log.Printf("  ✓ 限价单已成交: %s %s (订单ID: %d), 自动设置止盈止损",
 						pendingOrder.Symbol, pendingOrder.Side, pendingOrder.OrderID)
-
+					
 					// 设置止损
 					if pendingOrder.StopLoss > 0 {
 						if err := at.trader.SetStopLoss(pendingOrder.Symbol, strings.ToUpper(pendingOrder.Side), qty, pendingOrder.StopLoss); err != nil {
@@ -2246,7 +2246,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 			if len(positions) >= 3 {
 				return fmt.Errorf("❌ 总持仓数已达上限（3个），拒绝开新仓。当前持仓：%d", len(positions))
 			}
-
+			
 			// 检查同币种同方向是否已有持仓
 			for _, pos := range positions {
 				if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
@@ -2331,7 +2331,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 			if len(positions) >= 3 {
 				return fmt.Errorf("❌ 总持仓数已达上限（3个），拒绝开新仓。当前持仓：%d", len(positions))
 			}
-
+			
 			// 检查同币种同方向是否已有持仓
 			for _, pos := range positions {
 				if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
@@ -3378,7 +3378,7 @@ func (at *AutoTrader) executeLimitOpenLongWithRecord(decision *decision.Decision
 		if totalPositions >= 3 {
 			return fmt.Errorf("❌ 总持仓数（含限价单）已达上限（3个），拒绝挂新单。当前：%d持仓 + %d限价单", len(positions), len(at.pendingOrders))
 		}
-
+		
 		// 检查同币种同方向是否已有持仓
 		for _, pos := range positions {
 			if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
@@ -3520,7 +3520,7 @@ func (at *AutoTrader) executeLimitOpenShortWithRecord(decision *decision.Decisio
 		if totalPositions >= 3 {
 			return fmt.Errorf("❌ 总持仓数（含限价单）已达上限（3个），拒绝挂新单。当前：%d持仓 + %d限价单", len(positions), len(at.pendingOrders))
 		}
-
+		
 		// 检查同币种同方向是否已有持仓
 		for _, pos := range positions {
 			if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
@@ -3628,7 +3628,7 @@ func (at *AutoTrader) executeCancelLimitOrderWithRecord(decision *decision.Decis
 		delete(at.pendingOrders, posKey)
 		delete(at.positionFirstSeenTime, posKey)
 	}
-
+	
 	// ⚠️ 重要修复：无论是否在pendingOrders中找到，只要取消成功，都应该减少计数
 	// 因为限价单可能因为同步延迟等原因不在pendingOrders中，但确实存在并已取消
 	if at.dailyPairTrades[decision.Symbol] > 0 {
