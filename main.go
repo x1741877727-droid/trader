@@ -184,10 +184,9 @@ func main() {
 	useDefaultCoins := useDefaultCoinsStr == "true"
 	apiPortStr, _ := database.GetSystemConfig("api_server_port")
 
-	// 获取管理员模式配置
-	adminModeStr, _ := database.GetSystemConfig("admin_mode")
-	adminMode := adminModeStr != "false" // 默认为true
-	log.Printf("🔧 管理员模式配置: %s (最终状态: %s)", adminModeStr, map[bool]string{true: "开启", false: "关闭"}[adminMode])
+	// 管理员模式强制开启（默认启用，无需登录）
+	adminMode := true
+	log.Printf("🔧 管理员模式: 强制开启（无需登录即可访问Web界面）")
 
 	// 设置JWT密钥
 	jwtSecret, _ := database.GetSystemConfig("jwt_secret")
